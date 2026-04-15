@@ -1,0 +1,74 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# final_config.yaml — UAV Visual Odometry Yarışma Konfigürasyonu
+# FREEZE DATE: 2026-04-15
+# ─────────────────────────────────────────────────────────────────────────────
+
+# ── Final seçimler (sabit) ────────────────────────────────────────────────────
+selected_model: DROID          # DROID-SLAM — %82.4 RMSE farkı vs ORB
+selected_world: v4             # slam_world_realistic.sdf — v5 Δ=0.000m iyileşme yok
+stride: 3                      # stride=3 > stride=1 (%13.1 daha iyi)
+camera_height: 4.0             # metre — parallax optimumu
+
+# ── Seçilen model ─────────────────────────────────────────────────────────────
+model:
+  name: DROID
+  backend: slam          # "slam" | "lk_fallback"
+  rationale: "RMSE_2D farkı %82.4 — DROID 0.020m vs ORB 0.113m"
+
+# ── Sağlıklı frame stratejisi ──────────────────────────────────────────────────
+health:
+  strategy_healthy: reference   # health=1 → referans pozisyonu gönder
+  # "reference": sıfır hata, en güvenli seçenek
+  # "estimator": estimator tahmini gönder (daha az doğru)
+
+# ── Kamera parametreleri (Gazebo competition_world.sdf ile eşleşir) ───────────
+camera:
+  fx: 457.0
+  fy: 457.0
+  cx: 320.0
+  cy: 240.0
+  width: 640
+  height: 480
+  fps: 15
+
+# ── Kalibrasyon ────────────────────────────────────────────────────────────────
+calibration:
+  min_frames: 30          # kalibrasyon için minimum health=1 delta çifti
+  update_every: 50        # kaç yeni çiftte bir yeniden kalibrasyon
+  calib_window_frames: 450  # yarışma başındaki garantili h=1 penceresi
+
+# ── Adaptif stride (SLAMBackend) ──────────────────────────────────────────────
+stride:
+  low_motion_threshold_px: 1.5   # altında → stride=1 (her frame keyframe)
+  stride_high: 3                 # yüksek harekette frame atlama faktörü
+  keyframe_filter_px: 0.5        # altında → delta ihmal edilir (statik gürültü)
+
+# ── EMA smoothing (OnlineEstimator) ───────────────────────────────────────────
+ema:
+  alpha: 0.7          # 0 = maksimum yumuşatma, 1 = yumuşatma yok
+  # 0.7 → yeni ölçüme %70, önceki EMA'ya %30 ağırlık
+
+# ── Drift detection (OnlineEstimator) ─────────────────────────────────────────
+drift_detection:
+  max_jump_m: 3.0       # metre — üzerinde tahmin reddedilir ve rollback yapılır
+  # Uyarı: platformun fiziksel max hızına göre ayarlanmalı
+  # Örn: 10 m/s UAV, 15 fps → max frame delta ≈ 0.67m → eşik en az 1.0m olmalı
+
+# ── DROID SLAM parametreleri ───────────────────────────────────────────────────
+droid_slam:
+  # Gerçek DROID-SLAM entegrasyonu için
+  weights: "DROID-SLAM/droid.pth"
+  image_size: [240, 320]    # resize hedefi (DROID beklentisi)
+  buffer_size: 512          # slam buffer (RAM/VRAM trade-off)
+  # Stride: stride parametresi DROID online modunda frame atlama kontrolü
+  # Adaptif stride yukarıdaki [stride] bloğu tarafından yönetilir
+
+# ── Logging ────────────────────────────────────────────────────────────────────
+logging:
+  level: INFO
+  log_every_n_frames: 50
+
+# ── Çıktı ─────────────────────────────────────────────────────────────────────
+output:
+  results_log: "competition/results_log.csv"
+  save_trajectory: true

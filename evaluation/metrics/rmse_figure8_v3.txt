@@ -1,0 +1,11 @@
+n_slam_frames=300
+path_scale=121.7709
+best_transform=wx=-sz wy=sy
+scale_x=0.2652
+scale_y=0.5037
+
+path_scale_only: RMSE_x=2.9627 RMSE_y=4.7169 RMSE_2D=5.5701
+axis_scale:      RMSE_x=2.7796 RMSE_y=2.6669 RMSE_2D=3.8521
+
+imp_vs_v2_axis=30.2%
+imp_vs_baseline=70.3%

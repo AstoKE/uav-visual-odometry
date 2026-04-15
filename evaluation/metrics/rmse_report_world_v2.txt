@@ -1,0 +1,7 @@
+final_scale=4.0635
+RMSE_x=5.7012 m
+RMSE_y=3.7460 m
+RMSE_2D=6.8218 m
+Procrustes=0.00°
+İyileşme vs world_v1=13.1%
+İyileşme vs baseline=47.5%

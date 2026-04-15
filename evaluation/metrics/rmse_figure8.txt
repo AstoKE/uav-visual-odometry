@@ -1,0 +1,9 @@
+n_slam_frames=300
+path_scale=109.6669
+best_transform=wx=-sz wy=sy
+scale_x=-0.0297
+scale_y=0.3895
+path_scale_only: RMSE_x=7.1616 RMSE_y=8.5785 RMSE_2D=11.1749
+axis_scale:      RMSE_x=4.2432 RMSE_y=3.5341 RMSE_2D=5.5222
+imp_vs_lawnmower=3.0%
+imp_vs_baseline=57.5%

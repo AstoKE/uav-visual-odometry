@@ -1,0 +1,13 @@
+n_slam_frames=900
+stride=1
+path_scale=125.5224
+best_transform=wx=-sz wy=sy
+scale_x=0.3956
+scale_y=0.8759
+
+path_scale_only: RMSE_x=3.2998 RMSE_y=4.5025 RMSE_2D=5.5822
+axis_scale:      RMSE_x=3.2155 RMSE_y=2.9370 RMSE_2D=4.3549
+
+imp_vs_v3_stride3=-13.1%
+imp_vs_v2_axis=21.1%
+imp_vs_baseline=66.5%

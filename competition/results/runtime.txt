@@ -1,0 +1,50 @@
+  avg_fps       = 21675.3
+  max_latency   = 12.594 ms
+  calibrated    = True
+  calib_frames  = 98
+  M             = [[193.12573,-1783.44385],[3128.43277,341.83185]]
+  scale_x       = 193.12573
+  scale_y       = 341.83185
+
+  avg_fps       = 38112.8
+  max_latency   = 6.584 ms
+  calibrated    = True
+  calib_frames  = 98
+  M             = [[34.73815,-4.88076],[5.00385,34.57008]]
+  scale_x       = 34.73815
+  scale_y       = 34.57008
+
+  avg_fps       = 37755.7
+  max_latency   = 6.620 ms
+  calibrated    = True
+  calib_frames  = 98
+  M             = [[32.99339,-9.15531],[9.45617,33.95347]]
+  scale_x       = 32.99339
+  scale_y       = 33.95347
+
+  avg_fps       = 13046.4
+  max_latency   = 20.211 ms
+  calibrated    = True
+  calib_frames  = 166
+  M             = [[34.64466,-4.88262],[4.84314,34.60833]]
+  scale_x       = 34.64466
+  scale_y       = 34.60833
+
+[ORB]
+  avg_fps       = 23372.1
+  max_latency   = 9.400 ms
+  calibrated    = True
+  calib_frames  = 166
+  M             = [[31.87678,-9.57729],[6.18048,33.12973]]
+  scale_x       = 31.87678
+  scale_y       = 33.12973
+
+[DROID]
+  avg_fps       = 25068.8
+  max_latency   = 9.388 ms
+  calibrated    = True
+  calib_frames  = 166
+  M             = [[-14.32783,-1823.85894],[1949.07015,-238.31567]]
+  scale_x       = 14.32783
+  scale_y       = 238.31567
+

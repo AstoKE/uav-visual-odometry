@@ -1,0 +1,22 @@
+=================================================================
+Realism Benchmark — v4 vs v5 World Karşılaştırması
+=================================================================
+
+Metrik                       v4 (realistic)  v5 (v5_realistic)     Fark
+-----------------------------------------------------------------
+RMSE_2D (m)                             N/A                N/A      N/A
+Final Drift (m)                         N/A                N/A      N/A
+Max Drift (m)                           N/A                N/A      N/A
+
+Not: ↓ = v5 daha iyi (daha düşük hata)
+     ↑ = v4 daha iyi
+
+v5 Yenilikleri:
+  - Lens distortion (k1=-0.12, k2=0.015)
+  - Noise stddev 0.010 → 0.015–0.022 (seed-bağımlı)
+  - Ambient 0.40 → 0.18–0.25 (3-light setup)
+  - 5 yüksek kule (parallax)
+  - 10 çok katlı platform
+  - 8 dinamik Actor (SLAM robustness testi)
+  - Zemin kir lekeleri (feature diversity)
+=================================================================

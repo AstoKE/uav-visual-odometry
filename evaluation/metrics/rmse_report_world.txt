@@ -1,0 +1,5 @@
+RMSE_x=7.7476 m
+RMSE_y=1.2612 m
+RMSE_2D=7.8496 m
+Procrustes=0.00°
+İyileşme=43.4%
