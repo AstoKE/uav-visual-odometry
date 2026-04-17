@@ -17,12 +17,15 @@ Gerçek API endpoint'leri ve auth şeması belli olduktan sonra
 aşağıdaki _API_* sabitlerini güncelle.
 """
 
+from __future__ import annotations
+
 import requests
 import numpy as np
 import cv2
 import json
 import logging
 from dataclasses import dataclass
+from typing import Optional
 
 log = logging.getLogger(__name__)
 
@@ -62,7 +65,7 @@ class CompetitionClient:
         Bearer token veya API key (varsa)
     """
 
-    def __init__(self, base_url: str = _DEFAULT_BASE_URL, token: str | None = None):
+    def __init__(self, base_url: str = _DEFAULT_BASE_URL, token: Optional[str] = None):
         self.base_url = base_url.rstrip("/")
         self.session  = requests.Session()
         if token:
@@ -100,7 +103,7 @@ class CompetitionClient:
 
     # ── Frame akışı ───────────────────────────────────────────────────────────
 
-    def get_next_frame(self) -> FrameData | None:
+    def get_next_frame(self) -> Optional[FrameData]:
         """
         Sunucudan bir sonraki frame'i al.
         Oturum bittiyse None döner.
@@ -174,5 +177,5 @@ class CompetitionClient:
         return resp.content
 
     @property
-    def camera_params(self) -> CameraParams | None:
+    def camera_params(self) -> Optional[CameraParams]:
         return self._camera_params

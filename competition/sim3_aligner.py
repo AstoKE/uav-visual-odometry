@@ -133,17 +133,20 @@ class Sim3Aligner:
 
         # RMSE hesapla
         est = (s * (R @ src.T)).T + t  # (N, 3)
-        self._rmse_calib = float(np.sqrt(np.mean(
+        new_rmse = float(np.sqrt(np.mean(
             np.sum((est - dst) ** 2, axis=1)
         )))
 
-        # Stabilite: yeniden kalibrasyon RMSE'yi %50'den fazla artırıyorsa reddet
-        if self._calibrated:
-            if self._rmse_calib > 2.0 and len(self._pairs) > 50:
+        # Stabilite: yeni RMSE mevcut kalibrasyondan %100'den fazla kötüyse reddet
+        # Göreceli eşik kullan — sabit 2m eşiği gerçek video için çok sıkı
+        if self._calibrated and not np.isnan(self._rmse_calib) and len(self._pairs) > 50:
+            if new_rmse > self._rmse_calib * 2.0:
                 log.warning(
-                    f"Sim3: kalibrasyon RMSE yüksek ({self._rmse_calib:.3f}m), güncelleme reddedildi"
+                    f"Sim3: kalibrasyon RMSE yüksek ({new_rmse:.3f}m vs mevcut {self._rmse_calib:.3f}m), güncelleme reddedildi"
                 )
                 return
+
+        self._rmse_calib = new_rmse
 
         self._s = s
         self._R = R

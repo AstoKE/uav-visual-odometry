@@ -14,6 +14,8 @@ Kullanım:
     python3 competition/run_demo.py --frames 2000 --seed 7 --out competition/results
 """
 
+from __future__ import annotations
+
 import argparse
 import csv
 import math
@@ -27,6 +29,7 @@ sys.path.insert(0, _REPO)
 
 from competition.slam_pose_estimator import SLAMPoseEstimator
 from competition.simulate_health     import make_health_flags
+from competition.score_official      import score_summary
 
 RESULTS_DIR = os.path.join(_REPO, "competition/results")
 
@@ -147,17 +150,37 @@ def run_demo(n_frames: int = 2000, seed: int = 42,
         (est_pos[:, 1] - gt_pos[:, 1]) ** 2
     )
     rmse_2d_dead = float(np.sqrt(np.mean(errs_2d[dead_idx] ** 2))) if dead_idx else float("nan")
-    final_drift = float(errs_2d[-1])
-    max_drift = float(np.max(errs_2d[dead_idx])) if dead_idx else float("nan")
+    final_drift  = float(errs_2d[-1])
+    max_drift    = float(np.max(errs_2d[dead_idx])) if dead_idx else float("nan")
+
+    # Resmi yarışma skoru — §9.2 Denklem 2 (MAE_3D)
+    # health=1'de referans gönderilir (sıfır hata) → payda = N_toplam
+    est_tuples = [(float(est_pos[i, 0]), float(est_pos[i, 1]), float(est_pos[i, 2]))
+                  for i in range(n_frames)]
+    ref_tuples = [(float(gt_pos[i, 0]),  float(gt_pos[i, 1]),  0.0)
+                  for i in range(n_frames)]
+    sc = score_summary(est_tuples, ref_tuples, health.tolist())
+    # Optimal strateji hesabı: health=1'de sıfır hata
+    dead_err_sum = sum(
+        math.sqrt((est_pos[i, 0] - gt_pos[i, 0])**2 +
+                  (est_pos[i, 1] - gt_pos[i, 1])**2 +
+                  est_pos[i, 2]**2)
+        for i in dead_idx
+    )
+    mae_3d_official = dead_err_sum / n_frames  # payda = toplam frame
 
     metrics = {
-        "n_frames":      n_frames,
-        "n_dead":        len(dead_idx),
-        "calibrated":    est.calibrated,
-        "calib_n":       est.calib_data_count,
-        "rmse_2d_dead":  rmse_2d_dead,
-        "final_drift":   final_drift,
-        "max_drift":     max_drift,
+        "n_frames":         n_frames,
+        "n_dead":           len(dead_idx),
+        "calibrated":       est.calibrated,
+        "calib_n":          est.calib_data_count,
+        # ── Resmi yarışma skoru ───────────────────────────────────────────────
+        "mae_3d_official":  round(mae_3d_official, 4),  # §9.2 Denklem 2
+        "mae_3d_dead_only": round(sc["mae_3d_dead"], 4),
+        # ── İç metrikler ─────────────────────────────────────────────────────
+        "rmse_2d_dead":     rmse_2d_dead,
+        "final_drift":      final_drift,
+        "max_drift":        max_drift,
     }
 
     # Grafikler
@@ -169,6 +192,8 @@ def run_demo(n_frames: int = 2000, seed: int = 42,
     print(f"{'='*55}")
     print(f"Health=0 frame   : {len(dead_idx)} ({100*len(dead_idx)/n_frames:.1f}%)")
     print(f"Kalibre          : {'Evet' if est.calibrated else 'Hayır'}  (n={est.calib_data_count})")
+    print(f"MAE_3D★ (resmi)  : {mae_3d_official:.4f} m  ← §9.2 yarışma skoru")
+    print(f"MAE_3D (dead)    : {sc['mae_3d_dead']:.4f} m")
     print(f"RMSE_2D (dead)   : {rmse_2d_dead:.4f} m")
     print(f"Final drift      : {final_drift:.4f} m")
     print(f"Max drift        : {max_drift:.4f} m")

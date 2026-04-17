@@ -21,21 +21,42 @@ health:
   # "reference": sıfır hata, en güvenli seçenek
   # "estimator": estimator tahmini gönder (daha az doğru)
 
-# ── Kamera parametreleri (Gazebo competition_world.sdf ile eşleşir) ───────────
+# ── Resmi yarışma oturumu parametreleri (§2.2.2) ──────────────────────────────
+session:
+  total_frames: 2250       # 5 dakika × 7.5fps (veya değişebilir)
+  calib_guaranteed: 450    # ilk 450 frame kesinlikle health=1 (§2.2.2)
+  remaining_frames: 1800   # son 4 dakika — health belirsiz
+
+# ── Puanlama (§9.2 Denklem 2) ─────────────────────────────────────────────────
+scoring:
+  formula: "MAE_3D"        # (1/N) * Σ √(Δx²+Δy²+Δz²) — Z dahil!
+  strategy_h1: "reference" # health=1 → referans gönder → SIFIR HATA
+  strategy_h0: "estimator" # health=0 → tahmin gönder
+  # ÖNEMLİ: payda = N_TOPLAM (tüm frame'ler), yalnızca dead değil
+
+# ── Kamera açısı (§2.2.1) ─────────────────────────────────────────────────────
+camera_angle_deg: "70-90"  # aşağıya bakış (nadir yakın)
+
+# ── Kamera parametreleri (Kamera_Kalibrasyon_Parametreleri_2026.txt) ──────────
+# Kaynak: RGB Camera 1080p Intrinsics — resmi yarışma kalibrasyonu
 camera:
-  fx: 457.0
-  fy: 457.0
-  cx: 320.0
-  cy: 240.0
-  width: 640
-  height: 480
-  fps: 15
+  fx: 1389.7
+  fy: 1387.1
+  cx: 954.0
+  cy: 558.9
+  width: 1920
+  height: 1080
+  fps: 30
+  dist_k1: 0.1378
+  dist_k2: -0.2564
+  dist_p1: 0.0
+  dist_p2: 0.0
 
 # ── Kalibrasyon ────────────────────────────────────────────────────────────────
 calibration:
   min_frames: 30          # kalibrasyon için minimum health=1 delta çifti
   update_every: 50        # kaç yeni çiftte bir yeniden kalibrasyon
-  calib_window_frames: 450  # yarışma başındaki garantili h=1 penceresi
+  calib_window_frames: 450  # yarışma başındaki garantili h=1 penceresi (§2.2.2)
 
 # ── Adaptif stride (SLAMBackend) ──────────────────────────────────────────────
 stride:

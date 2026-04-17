@@ -30,9 +30,12 @@ Kullanım:
         x, y, z = est.update(frame, ref_pos, health)
 """
 
+from __future__ import annotations
+
 import logging
 import math
 from collections import deque
+from typing import Optional
 
 import cv2
 import numpy as np
@@ -81,8 +84,8 @@ class OnlineEstimator:
         sim3_min_pairs: int = 10,
         sim3_update_every: int = 25,
         min_keyframe_flow_px: float = 5.0,
-        altitude_m: float | None = None,
-        sim3_robust_sigma: float | None = 1.5,
+        altitude_m: Optional[float] = None,
+        sim3_robust_sigma: Optional[float] = 1.5,
     ):
         # 4.1 Kamera matrisi
         self.K = np.array([[fx,  0.0, cx],
@@ -112,10 +115,10 @@ class OnlineEstimator:
 
         # ── 4.4 Keyframe tabanlı yapı ────────────────────────────────────────
         self._min_keyframe_flow_px: float = min_keyframe_flow_px
-        self._keyframe_gray: np.ndarray | None = None
+        self._keyframe_gray: Optional[np.ndarray] = None
 
         # Bilinen irtifa → metrik ölçek (opsiyonel)
-        self._altitude_m: float | None = altitude_m
+        self._altitude_m: Optional[float] = altitude_m
 
         # Kümülatif yörünge (4×4 homojen, VO çerçevesi)
         self._T_world = np.eye(4, dtype=np.float64)
@@ -152,7 +155,7 @@ class OnlineEstimator:
         self._vel_history: deque = deque(maxlen=5)   # m/frame
 
         # Motion model: son başarılı T
-        self._last_valid_T: np.ndarray | None = None
+        self._last_valid_T: Optional[np.ndarray] = None
 
         self._frame_count  = 0
         self._kf_count     = 0
@@ -163,9 +166,9 @@ class OnlineEstimator:
     def update(
         self,
         frame: np.ndarray,
-        ref_pos: tuple | None,
+        ref_pos: Optional[tuple],
         health: int,
-    ) -> tuple[float, float, float]:
+    ) -> tuple:
         """
         Yeni kare işle.
 

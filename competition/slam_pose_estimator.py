@@ -5,6 +5,11 @@ OnlineEstimator ile aynı 2×2 kalibrasyonu kullanır, fark:
   - Optical flow yerine önceden hesaplanmış SLAM artımlı deltaları alır
   - Offline dataset testi ve SLAM karşılaştırması için tasarlanmıştır
 
+Z ekseni stratejisi (yarışma §9.2 — MAE_3D):
+  - health=1: Z doğrudan ref_pos[2]'den alınır (tam doğru)
+  - health=0: son bilinen Z değeri korunur (irtifa sabit varsayımı)
+              UAV'lar tipik olarak GPS-denied sırasında irtifa tutarlar.
+
 Kullanım:
     from competition.slam_pose_estimator import SLAMPoseEstimator
     est = SLAMPoseEstimator()
@@ -12,8 +17,11 @@ Kullanım:
         wx, wy, wz = est.update(slam_dx, slam_dy, ref_pos, health)
 """
 
+from __future__ import annotations
+
 import numpy as np
 import logging
+from typing import List, Optional, Tuple
 
 log = logging.getLogger(__name__)
 
@@ -45,12 +53,15 @@ class SLAMPoseEstimator:
         # Kalibrasyon durumu
         self._calibrated = False
         self._M = np.eye(2, dtype=np.float64)
-        self._calib_data: list[tuple] = []  # (d_sx, d_sy, d_rx, d_ry, d_rz)
+        self._calib_data: List[tuple] = []  # (d_sx, d_sy, d_rx, d_ry, d_rz)
 
         # Önceki değerler
-        self._prev_ref: tuple | None = None
+        self._prev_ref: Optional[tuple] = None
         self._prev_cum = (0.0, 0.0)
-        self._ref_origin: tuple | None = None
+        self._ref_origin: Optional[tuple] = None
+
+        # Z anchor: health=0'da son bilinen Z korunur (irtifa sabit varsayımı)
+        self._last_known_z: float = 0.0
 
         # Dünya pozisyonu
         self._world_x = 0.0
@@ -65,9 +76,9 @@ class SLAMPoseEstimator:
         self,
         slam_dx: float,
         slam_dy: float,
-        ref_pos: tuple | None,
+        ref_pos: Optional[Tuple[float, float, float]],
         health: int,
-    ) -> tuple[float, float, float]:
+    ) -> Tuple[float, float, float]:
         """
         Yeni bir frame için SLAM delta ile güncelle.
 
@@ -118,14 +129,23 @@ class SLAMPoseEstimator:
                 if not self._calibrated or (n % self.calib_update_every == 0):
                     self._run_calibration()
 
-        # Dünya pozisyonu
+        # Z anchor güncelle: health=1'de gerçek Z'yi kaydet
+        if health == 1 and ref_pos is not None and self._ref_origin is not None:
+            self._last_known_z = ref_pos[2] - self._ref_origin[2]
+
+        # Dünya pozisyonu (X, Y)
         if self._calibrated:
             v = self._M @ np.array([self._cum_sx, self._cum_sy])
             self._world_x, self._world_y = float(v[0]), float(v[1])
+            # Z: kalibrasyon sonrası da son bilinen Z'yi kullan (irtifa sabit)
+            self._world_z = self._last_known_z
         elif health == 1 and ref_pos is not None and self._ref_origin is not None:
             self._world_x = ref_pos[0] - self._ref_origin[0]
             self._world_y = ref_pos[1] - self._ref_origin[1]
             self._world_z = ref_pos[2] - self._ref_origin[2]
+        # health=0 ve henüz kalibrasyon yoksa: son bilinen Z'yi koru
+        else:
+            self._world_z = self._last_known_z
 
         return (self._world_x, self._world_y, self._world_z)
 
