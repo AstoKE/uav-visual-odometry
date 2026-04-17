@@ -1,18 +1,18 @@
 ÖRNEK VERİ DEĞERLENDİRME SONUÇLARI
 ========================================
-n_frames              : 3008
-n_dead                : 1333
-n_dead_pct            : 44.3
-stride                : 3
-fps                   : 42.0
-mae_3d_official       : 28.1568
-mae_3d_dead           : 63.5376
-rmse_2d_dead          : 87.448
-max_drift_2d          : 214.7517
-final_drift_2d        : 189.4841
+n_frames              : 20
+n_dead                : 0
+n_dead_pct            : 0.0
+stride                : 5
+fps                   : 8.1
+mae_3d_official       : 0.0
+mae_3d_dead           : N/A
+rmse_2d_dead          : N/A
+max_drift_2d          : N/A
+final_drift_2d        : 0.0
 calibrated            : True
-sim3_pairs            : 80
-sim3_scale            : 1.3303
-sim3_rmse             : 0.7971
-drift_rejected        : 1056
+sim3_pairs            : 12
+sim3_scale            : 50.933
+sim3_rmse             : 0.1892
+drift_rejected        : 0
 confidence            : 1.0

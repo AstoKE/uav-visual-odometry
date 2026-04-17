@@ -54,7 +54,6 @@ import numpy as np
 _REPO = os.path.expanduser("~/code/uav-visual-odometry")
 sys.path.insert(0, _REPO)
 
-from competition.estimator       import OnlineEstimator
 from competition.simulate_health import make_health_flags
 from competition.score_official  import score_summary, health1_optimal_score
 
@@ -140,6 +139,7 @@ def run_evaluation(
     altitude_m: Optional[float],
     stride: int,
     out_dir: str,
+    backend: str = "orb",
     log_every: int = 100,
 ) -> dict:
     """
@@ -184,18 +184,26 @@ def run_evaluation(
     # sonra resize — cv2.undistort K ile çalışır, scale sonrası K da ölçeklenir)
     dist_arr = np.array(dist_coeffs, dtype=np.float64) if dist_coeffs else None
 
-    # Estimator (ölçeklenmiş K ile)
-    # max_jump_m=8.0: 30fps × stride=3 → 0.1s adım, UAV max ~10 m/s → ~1m/adım
-    # Sim3 ölçek hatası + yüksek hız için geniş eşik
-    est = OnlineEstimator(
-        fx=fx_sc, fy=fy_sc, cx=cx_sc, cy=cy_sc,
-        dist_coeffs=dist_arr,
-        altitude_m=altitude_m,
-        n_features=1000,
-        sim3_min_pairs=10,
-        sim3_update_every=20,
-        max_jump_m=8.0,
-    )
+    # Estimator seç: droid veya orb (varsayılan)
+    if backend == "droid":
+        from competition.droid_estimator import DROIDEstimator
+        est = DROIDEstimator(
+            fx=fx_sc, fy=fy_sc, cx=cx_sc, cy=cy_sc,
+            dist_coeffs=list(dist_arr) if dist_arr is not None else None,
+            altitude_m=altitude_m,
+        )
+        print(f"[eval] Backend: {est.backend_name}")
+    else:
+        from competition.estimator import OnlineEstimator
+        est = OnlineEstimator(
+            fx=fx_sc, fy=fy_sc, cx=cx_sc, cy=cy_sc,
+            dist_coeffs=dist_arr,
+            altitude_m=altitude_m,
+            n_features=1000,
+            sim3_min_pairs=5,
+            sim3_update_every=20,
+            max_jump_m=8.0,
+        )
 
     rows      = []
     est_pos   = np.zeros((n_total, 3), dtype=np.float64)
@@ -512,6 +520,9 @@ def main():
                         help="Ortalama uçuş irtifası metre (bilinmiyorsa atla)")
     parser.add_argument("--max_frames", type=int, default=None,
                         help="Maksimum işlenecek orijinal kare sayısı (test için)")
+    parser.add_argument("--backend",   default="orb",
+                        choices=["orb", "droid"],
+                        help="VO backend: orb (varsayılan) veya droid (CUDA gerektirir)")
     parser.add_argument("--log_every", type=int, default=100,
                         help="İlerleme log aralığı")
     args = parser.parse_args()
@@ -555,6 +566,7 @@ def main():
         altitude_m=args.altitude,
         stride=args.stride,
         out_dir=args.out,
+        backend=args.backend,
         log_every=args.log_every,
     )
 

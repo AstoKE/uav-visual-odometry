@@ -123,10 +123,11 @@ class OnlineEstimator:
         # Kümülatif yörünge (4×4 homojen, VO çerçevesi)
         self._T_world = np.eye(4, dtype=np.float64)
 
-        # ── 4.3 Sim(3) hizalama (Huber-robust opsiyonel) ─────────────────────
+        # ── 4.3 Sim(3) hizalama (Huber-robust opsiyonel, sliding window) ────────
         self._sim3 = Sim3Aligner(
             min_pairs=sim3_min_pairs,
             update_every=sim3_update_every,
+            window_size=80,
         )
         self._sim3_robust_sigma: float | None = sim3_robust_sigma
 
@@ -151,15 +152,17 @@ class OnlineEstimator:
         self._drift_rejected = 0
         self._pos_history: deque = deque(maxlen=20)
 
-        # Hız tahmini (adaptive threshold için)
-        self._vel_history: deque = deque(maxlen=5)   # m/frame
+        # Hız tahmini — vektör (vx, vy) olarak tutulur
+        self._vel_history: deque = deque(maxlen=5)      # scalar m/frame (adaptive threshold)
+        self._vel_vec_history: deque = deque(maxlen=8)  # (vx, vy) vektörler (extrapolation)
 
         # Motion model: son başarılı T
         self._last_valid_T: Optional[np.ndarray] = None
 
-        self._frame_count  = 0
-        self._kf_count     = 0
-        self._health0_count = 0  # art arda health=0 frame sayısı
+        self._frame_count   = 0
+        self._kf_count      = 0
+        self._health0_count = 0   # art arda health=0 frame sayısı
+        self._prev_health   = 1   # reset-on-health1 için önceki health durumu
 
     # ── Public API ────────────────────────────────────────────────────────────
 
@@ -184,6 +187,27 @@ class OnlineEstimator:
         """
         self._frame_count += 1
         gray = self._preprocess(frame)
+
+        # ── Health 0→1 geçişi: VO origin sıfırla ─────────────────────────────
+        # Birikim yapmış VO drift'i bir sonraki health=0 segmentine taşıma.
+        # T_world identity'ye döner, Sim3 yeni health=1 segmentiyle yeniden fit edilir.
+        if health == 1 and self._prev_health == 0 and self._keyframe_gray is not None:
+            # Tam reset: T_world + Sim3 + kalibrasyon verisi.
+            # Blackout sonrası birikmiş VO drift'i bir sonraki health=0'a taşıma.
+            # min_pairs=5 ile hızlı yeniden kalibrasyon (5 health=1 kare yeterli).
+            self._T_world      = np.eye(4, dtype=np.float64)
+            self._last_valid_T = None
+            self._sim3         = Sim3Aligner(
+                min_pairs    = 5,
+                update_every = self._sim3.update_every,
+                window_size  = self._sim3.window_size,
+            )
+            self._calib_vo.clear()
+            self._calib_ref.clear()
+            self._pos_history.clear()
+            self._vel_vec_history.clear()
+            log.debug(f"[Reset] health 0→1 frame={self._frame_count}: tam sıfırlama")
+        self._prev_health = health
 
         # ── İlk kare: keyframe başlat ─────────────────────────────────────────
         if self._keyframe_gray is None:
@@ -258,18 +282,25 @@ class OnlineEstimator:
                              (new_wy - self._world_y) ** 2)
             if jump > threshold:
                 self._drift_rejected += 1
+                self._T_world = self._T_world @ np.linalg.inv(T_rel)
+                # Donmak yerine hız vektörüyle extrapolation
+                new_wx, new_wy, new_wz = self._extrapolate_position()
                 log.debug(
                     f"[Drift] frame={self._frame_count}  jump={jump:.2f}m > "
-                    f"thresh={threshold:.2f}m  conf={self._confidence:.2f} — rollback"
+                    f"thresh={threshold:.2f}m — extrapolate "
+                    f"({new_wx:.2f},{new_wy:.2f})"
                 )
-                self._T_world = self._T_world @ np.linalg.inv(T_rel)
-                new_wx, new_wy, new_wz = self._world_x, self._world_y, self._world_z
 
-        # Hız güncelle (adaptive threshold için)
+        # Hız güncelle — hem scalar (adaptive threshold) hem vektör (extrapolation)
         if self._pos_history:
             prev = self._pos_history[-1]
-            spd  = math.sqrt((new_wx - prev[0])**2 + (new_wy - prev[1])**2)
+            vx   = new_wx - prev[0]
+            vy   = new_wy - prev[1]
+            spd  = math.sqrt(vx ** 2 + vy ** 2)
             self._vel_history.append(spd)
+            # Sadece gerçek hareketten vektör ekle (rejected değil)
+            if spd > 0.01:
+                self._vel_vec_history.append((vx, vy))
 
         self._world_x = new_wx
         self._world_y = new_wy
@@ -282,6 +313,22 @@ class OnlineEstimator:
         return self._ema_x, self._ema_y, self._ema_z
 
     # ── Yardımcı metodlar (update içinde kullanılan) ──────────────────────────
+
+    def _extrapolate_position(self) -> tuple:
+        """
+        Son bilinen hız vektörlerinin medyanıyla pozisyon tahmini.
+        VO gürültülü/drift yaptığında donmak yerine son hareketi sürdür.
+        Geçmiş yoksa mevcut pozisyonu döndür (freeze).
+        """
+        if len(self._vel_vec_history) >= 2:
+            vxs = [v[0] for v in self._vel_vec_history]
+            vys = [v[1] for v in self._vel_vec_history]
+            med_vx = float(np.median(vxs))
+            med_vy = float(np.median(vys))
+            return (self._world_x + med_vx,
+                    self._world_y + med_vy,
+                    self._world_z)
+        return self._world_x, self._world_y, self._world_z
 
     def _apply_ema(self, wx: float, wy: float, wz: float, health: int) -> None:
         """

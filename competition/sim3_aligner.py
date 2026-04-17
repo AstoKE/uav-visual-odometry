@@ -81,21 +81,27 @@ def umeyama_alignment(src: np.ndarray, dst: np.ndarray
 
 class Sim3Aligner:
     """
-    Artımlı Sim(3) hizalayıcı.
+    Artımlı Sim(3) hizalayıcı — sliding window desteği ile.
 
     İlk 450 kare (health=1) boyunca (vo_pos, ref_pos) çiftleri toplanır.
     Yeterli çift birikince (min_pairs) Umeyama hizalaması hesaplanır.
     Periyodik olarak (update_every) güncellenir.
 
+    window_size > 0 ise fit yalnızca son window_size çiftle yapılır.
+    Bu, uzun yörüngede VO drift birikiminin Sim3'ü bozmasını engeller.
+
     Parameters
     ----------
     min_pairs    : int — hizalama başlatmak için minimum çift sayısı
     update_every : int — kaç yeni çift eklenince yeniden hizalanır
+    window_size  : int — sliding window boyutu (0 = tüm geçmiş kullan)
     """
 
-    def __init__(self, min_pairs: int = 10, update_every: int = 20):
-        self.min_pairs   = min_pairs
+    def __init__(self, min_pairs: int = 10, update_every: int = 20,
+                 window_size: int = 80):
+        self.min_pairs    = min_pairs
         self.update_every = update_every
+        self.window_size  = window_size
 
         self._pairs: list[tuple[np.ndarray, np.ndarray]] = []
         self._calibrated = False
@@ -126,8 +132,11 @@ class Sim3Aligner:
             self._run_alignment()
 
     def _run_alignment(self) -> None:
-        src = np.array([p[0] for p in self._pairs])  # (N, 3) VO
-        dst = np.array([p[1] for p in self._pairs])  # (N, 3) referans
+        # Sliding window: son window_size çiftle fit (0 = tümü)
+        window = (self._pairs[-self.window_size:]
+                  if self.window_size > 0 else self._pairs)
+        src = np.array([p[0] for p in window])  # (N, 3) VO
+        dst = np.array([p[1] for p in window])  # (N, 3) referans
 
         s, R, t = umeyama_alignment(src, dst)
 
