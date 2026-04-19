@@ -141,6 +141,7 @@ def run_evaluation(
     out_dir: str,
     backend: str = "orb",
     log_every: int = 100,
+    kf_flow: float = 5.0,
 ) -> dict:
     """
     Video üzerinde OnlineEstimator çalıştır, metrikleri hesapla.
@@ -203,6 +204,7 @@ def run_evaluation(
             sim3_min_pairs=5,
             sim3_update_every=1,
             max_jump_m=8.0,
+            min_keyframe_flow_px=kf_flow,
         )
 
     rows      = []
@@ -525,6 +527,8 @@ def main():
                         help="VO backend: orb (varsayılan) veya droid (CUDA gerektirir)")
     parser.add_argument("--log_every", type=int, default=100,
                         help="İlerleme log aralığı")
+    parser.add_argument("--kf_flow", type=float, default=5.0,
+                        help="min_keyframe_flow_px (varsayılan: 5.0)")
     args = parser.parse_args()
 
     # Veri yükle
@@ -568,6 +572,7 @@ def main():
         out_dir=args.out,
         backend=args.backend,
         log_every=args.log_every,
+        kf_flow=args.kf_flow,
     )
 
 

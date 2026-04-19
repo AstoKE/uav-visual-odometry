@@ -4,7 +4,7 @@ n_frames              : 3008
 n_dead                : 1333
 n_dead_pct            : 44.3
 stride                : 3
-fps                   : 50.9
+fps                   : 51.2
 mae_3d_official       : 11.0216
 mae_3d_dead           : 24.8709
 rmse_2d_dead          : 31.0803

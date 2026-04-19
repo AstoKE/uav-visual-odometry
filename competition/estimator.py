@@ -86,6 +86,7 @@ class OnlineEstimator:
         min_keyframe_flow_px: float = 5.0,
         altitude_m: Optional[float] = None,
         sim3_robust_sigma: Optional[float] = 1.5,
+        health0_freeze_after: Optional[int] = None,
     ):
         # 4.1 Kamera matrisi
         self.K = np.array([[fx,  0.0, cx],
@@ -137,6 +138,7 @@ class OnlineEstimator:
             window_size=60,
         )
         self._sim3_robust_sigma: float | None = sim3_robust_sigma
+        self._health0_freeze_after: Optional[int] = health0_freeze_after
 
         # Ham kalibrasyon çiftleri (robust weighting için saklanır)
         self._calib_vo:  list[np.ndarray] = []
@@ -229,6 +231,10 @@ class OnlineEstimator:
 
         if health == 0:
             self._health0_count += 1
+            # Uzun blackout: VO güvenilmez hale geliyor, son iyi pozisyonda don.
+            if (self._health0_freeze_after is not None
+                    and self._health0_count > self._health0_freeze_after):
+                return self._ema_x, self._ema_y, self._ema_z
         else:
             self._health0_count = 0
 
