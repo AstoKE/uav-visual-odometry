@@ -98,7 +98,7 @@ class OnlineEstimator:
         self.max_jump_m     = max_jump_m
         self._adaptive_drift = adaptive_drift
 
-        # ── 4.2 ORB + BFMatcher ──────────────────────────────────────────────
+        # ── 4.2 LK flow (primary) + ORB (fallback) ───────────────────────────
         self._orb = cv2.ORB_create(
             nfeatures=n_features,
             scaleFactor=1.2,
@@ -112,6 +112,13 @@ class OnlineEstimator:
         self._matcher    = cv2.BFMatcher(cv2.NORM_HAMMING, crossCheck=False)
         self._lowe_ratio = lowe_ratio
         self._ransac_thr = ransac_thresh
+
+        # LK tracking state — feature points carried from last keyframe
+        self._lk_pts: Optional[np.ndarray] = None   # (N, 1, 2) float32
+        self._lk_params = dict(winSize=(21, 21), maxLevel=3,
+                               criteria=(cv2.TERM_CRITERIA_EPS | cv2.TERM_CRITERIA_COUNT,
+                                         30, 0.01))
+
 
         # ── 4.4 Keyframe tabanlı yapı ────────────────────────────────────────
         self._min_keyframe_flow_px: float = min_keyframe_flow_px
@@ -127,7 +134,7 @@ class OnlineEstimator:
         self._sim3 = Sim3Aligner(
             min_pairs=sim3_min_pairs,
             update_every=sim3_update_every,
-            window_size=80,
+            window_size=60,
         )
         self._sim3_robust_sigma: float | None = sim3_robust_sigma
 
@@ -153,8 +160,8 @@ class OnlineEstimator:
         self._pos_history: deque = deque(maxlen=20)
 
         # Hız tahmini — vektör (vx, vy) olarak tutulur
-        self._vel_history: deque = deque(maxlen=5)      # scalar m/frame (adaptive threshold)
-        self._vel_vec_history: deque = deque(maxlen=8)  # (vx, vy) vektörler (extrapolation)
+        self._vel_history: deque = deque(maxlen=5)       # scalar m/frame (adaptive threshold)
+        self._vel_vec_history: deque = deque(maxlen=16)  # (vx, vy) vektörler (extrapolation; daha uzun geçmiş)
 
         # Motion model: son başarılı T
         self._last_valid_T: Optional[np.ndarray] = None
@@ -188,17 +195,14 @@ class OnlineEstimator:
         self._frame_count += 1
         gray = self._preprocess(frame)
 
-        # ── Health 0→1 geçişi: VO origin sıfırla ─────────────────────────────
-        # Birikim yapmış VO drift'i bir sonraki health=0 segmentine taşıma.
-        # T_world identity'ye döner, Sim3 yeni health=1 segmentiyle yeniden fit edilir.
+        # ── Health 0→1 geçişi: tam sıfırlama ────────────────────────────────────
+        # Birikmiş VO drift'i bir sonraki health=0 segmentine taşıma.
+        # T_world identity'ye döner; Sim3 ve kalibrasyon verisi temizlenir.
         if health == 1 and self._prev_health == 0 and self._keyframe_gray is not None:
-            # Tam reset: T_world + Sim3 + kalibrasyon verisi.
-            # Blackout sonrası birikmiş VO drift'i bir sonraki health=0'a taşıma.
-            # min_pairs=5 ile hızlı yeniden kalibrasyon (5 health=1 kare yeterli).
             self._T_world      = np.eye(4, dtype=np.float64)
             self._last_valid_T = None
             self._sim3         = Sim3Aligner(
-                min_pairs    = 5,
+                min_pairs    = self._sim3.min_pairs,
                 update_every = self._sim3.update_every,
                 window_size  = self._sim3.window_size,
             )
@@ -206,6 +210,7 @@ class OnlineEstimator:
             self._calib_ref.clear()
             self._pos_history.clear()
             self._vel_vec_history.clear()
+            self._lk_pts = None
             log.debug(f"[Reset] health 0→1 frame={self._frame_count}: tam sıfırlama")
         self._prev_health = health
 
@@ -316,19 +321,38 @@ class OnlineEstimator:
 
     def _extrapolate_position(self) -> tuple:
         """
-        Son bilinen hız vektörlerinin medyanıyla pozisyon tahmini.
-        VO gürültülü/drift yaptığında donmak yerine son hareketi sürdür.
+        İvme-destekli pozisyon tahmini (dead reckoning).
+
+        Yeterli hız geçmişi varsa:
+          1. Median hız (gürültüye karşı dayanıklı baz)
+          2. Son 3 ile ilk 3 arasındaki hız trendinden ivme tahmini
+          3. x_new = x + v_median + 0.5 * a  (bir adımlık kinematik model)
         Geçmiş yoksa mevcut pozisyonu döndür (freeze).
         """
-        if len(self._vel_vec_history) >= 2:
-            vxs = [v[0] for v in self._vel_vec_history]
-            vys = [v[1] for v in self._vel_vec_history]
-            med_vx = float(np.median(vxs))
-            med_vy = float(np.median(vys))
-            return (self._world_x + med_vx,
-                    self._world_y + med_vy,
-                    self._world_z)
-        return self._world_x, self._world_y, self._world_z
+        n = len(self._vel_vec_history)
+        if n < 2:
+            return self._world_x, self._world_y, self._world_z
+
+        vxs = [v[0] for v in self._vel_vec_history]
+        vys = [v[1] for v in self._vel_vec_history]
+        med_vx = float(np.median(vxs))
+        med_vy = float(np.median(vys))
+
+        # İvme: son yarı - ilk yarı medyanı arasındaki fark
+        if n >= 4:
+            half = n // 2
+            ax = float(np.median(vxs[half:]) - np.median(vxs[:half]))
+            ay = float(np.median(vys[half:]) - np.median(vys[:half]))
+            # Aşırı ivme sınırı: medyan hızın 3 katını geçmesin
+            max_a = 3.0 * max(abs(med_vx), abs(med_vy), 0.01)
+            ax = float(np.clip(ax, -max_a, max_a))
+            ay = float(np.clip(ay, -max_a, max_a))
+        else:
+            ax, ay = 0.0, 0.0
+
+        return (self._world_x + med_vx + 0.5 * ax,
+                self._world_y + med_vy + 0.5 * ay,
+                self._world_z)
 
     def _apply_ema(self, wx: float, wy: float, wz: float, health: int) -> None:
         """
@@ -529,48 +553,36 @@ class OnlineEstimator:
         """
         4.2 Görüntüden hareket çıkarımı — planar sahne uyumlu.
 
-        Adımlar:
-          1. ORB feature çıkarımı (önceki ve mevcut kare)
-          2. BFMatcher kNN + Lowe ratio test
-          3. RANSAC + Homography (düzlemsel zemin için E yerine H kullanılır)
-             NOT: Essential Matrix zemine dik bakan monoküler kamerada dejenere
-             olur. ORB-SLAM3 de bu senaryoda Homography tabanlı pose kurtarma kullanır.
-          4. decomposeHomographyMat → R, t seçimi (en çok pozitif derinliğe sahip)
-          5. Yedek: medyan inlier flow / fx → translasyon (H decomp başarısız ise)
+        Birincil: LK optical flow tracking (goodFeaturesToTrack → calcOpticalFlowPyrLK)
+          - ORB descriptor eşleşmesinden kaynaklanan yanlış eşleşme riski yok
+          - Alt piksel hassasiyeti, geniş hareket için piramit LK
 
-        Döndürür: (R, t, n_inliers, T_4x4) veya (None, None, 0, I_4x4)
+        Yedek (LK yetersiz nokta dönerse): ORB + BFMatcher + Lowe ratio
+
+        Ortak son adımlar:
+          3. RANSAC + Homography (düzlemsel zemin için E yerine H)
+          4. decomposeHomographyMat → R, t (en yüksek pozitif derinlik skoru)
+          5. Fallback: medyan inlier flow / fx → translasyon
         """
         T_eye = np.eye(4, dtype=np.float64)
 
-        # 1. ORB
-        kp1, d1 = self._orb.detectAndCompute(gray_prev, None)
-        kp2, d2 = self._orb.detectAndCompute(gray_curr,  None)
+        # ── 1. LK feature tracking (birincil) ────────────────────────────────
+        pts1, pts2 = self._lk_track(gray_prev, gray_curr)
 
-        if d1 is None or d2 is None or len(kp1) < 8 or len(kp2) < 8:
+        # ── 2. ORB yedek: LK yeterli nokta bulamazsa ─────────────────────────
+        if pts1 is None or len(pts1) < 8:
+            pts1, pts2 = self._orb_match(gray_prev, gray_curr)
+
+        if pts1 is None or len(pts1) < 8:
+            self._lk_pts = None
             return None, None, 0, T_eye
 
-        # 2. BFMatcher + Lowe ratio test
-        raw = self._matcher.knnMatch(d1, d2, k=2)
-        good = []
-        for pair in raw:
-            if len(pair) == 2:
-                m, n_m = pair
-                if m.distance < self._lowe_ratio * n_m.distance:
-                    good.append(m)
-
-        if len(good) < 8:
-            return None, None, 0, T_eye
-
-        pts1 = np.float32([kp1[m.queryIdx].pt for m in good])
-        pts2 = np.float32([kp2[m.trainIdx].pt for m in good])
-
-        # Yeterli piksel hareketi kontrol et (ortalama)
+        # Yeterli piksel hareketi kontrol et
         flow = pts2 - pts1
-        mean_flow = float(np.mean(np.abs(flow)))
-        if mean_flow < 0.5:   # çok küçük hareket → sıfır delta
+        if float(np.mean(np.abs(flow))) < 0.5:
             return None, None, 0, T_eye
 
-        # 3. RANSAC + Homography
+        # ── 3. RANSAC + Homography ────────────────────────────────────────────
         H, mask_h = cv2.findHomography(pts1, pts2, cv2.RANSAC, self._ransac_thr)
 
         if mask_h is not None:
@@ -585,7 +597,7 @@ class OnlineEstimator:
         if n_inl < 4:
             return None, None, 0, T_eye
 
-        # 4a. Homography decompose → R, t (en iyi çözümü seç)
+        # ── 4a. Homography decompose → R, t ──────────────────────────────────
         R, t = None, None
         if H is not None:
             try:
@@ -595,25 +607,20 @@ class OnlineEstimator:
                 pass
 
         if R is None:
-            # 4b. Yedek: medyan inlier flow → translasyon (rotasyon ihmal)
-            #     Zemine dik, translasyon-baskın hareket için geçerli
+            # ── 4b. Fallback: medyan inlier flow → translasyon ────────────────
             fx_val = self.K[0, 0]
             fy_val = self.K[1, 1]
             if self._altitude_m is not None:
-                # Metrik ölçek: Δu_px × h / f → Δx metre
                 tx = float(np.median(inl_flow[:, 0])) * self._altitude_m / fx_val
                 ty = float(np.median(inl_flow[:, 1])) * self._altitude_m / fy_val
             else:
                 tx = float(np.median(inl_flow[:, 0])) / fx_val
                 ty = float(np.median(inl_flow[:, 1])) / fy_val
-            t  = np.array([[tx], [ty], [0.0]])
-            R  = np.eye(3, dtype=np.float64)
-            log.debug(f"[VO] H-decomp başarısız, fallback flow: tx={tx:.4f} ty={ty:.4f}")
+            t = np.array([[tx], [ty], [0.0]])
+            R = np.eye(3, dtype=np.float64)
 
-        # Altitude-weighted scale: t (unit-norm from Homography) →
-        # metrik birimlere çevir. Homography t yönü doğruysa ölçek ≈ altitude/f.
+        # ── Altitude scale ────────────────────────────────────────────────────
         if self._altitude_m is not None and R is not None and not (R == np.eye(3)).all():
-            # Tahmini t büyüklüğü: ortalama inlier flow magnitude × altitude/f
             flow_mag_px = float(np.mean(np.linalg.norm(inl_flow, axis=1)))
             scale_t = flow_mag_px * self._altitude_m / self.K[0, 0]
             t_arr = np.asarray(t).ravel()
@@ -624,8 +631,65 @@ class OnlineEstimator:
         T = np.eye(4, dtype=np.float64)
         T[:3, :3] = R
         T[:3, 3]  = np.asarray(t).ravel()
-
         return R, t, n_inl, T
+
+    def _lk_track(
+        self, gray_prev: np.ndarray, gray_curr: np.ndarray
+    ) -> tuple:
+        """
+        LK optical flow: gray_prev'deki köşeleri (her seferinde taze tespit)
+        gray_curr'a track et. Durumsuz (stateless) — keyframe'ler arası
+        drift birikimini önler.
+
+        Forward-backward tutarlılık kontrolü: yanlış eşleşmeleri filtreler.
+        (pts_prev → pts_curr → pts_back; |pts_prev - pts_back| < eşik)
+
+        Döndürür: (pts1, pts2) her biri (N,2) float32 veya (None, None).
+        """
+        pts_prev = cv2.goodFeaturesToTrack(
+            gray_prev,
+            maxCorners=400,
+            qualityLevel=0.02,
+            minDistance=10,
+            blockSize=7,
+        )
+        if pts_prev is None or len(pts_prev) < 8:
+            return None, None
+
+        # Sub-pixel refinement for better tracking accuracy
+        criteria_sp = (cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER, 30, 0.001)
+        pts_prev = cv2.cornerSubPix(gray_prev, pts_prev, (5, 5), (-1, -1), criteria_sp)
+
+        pts_curr, status, _ = cv2.calcOpticalFlowPyrLK(
+            gray_prev, gray_curr, pts_prev, None, **self._lk_params
+        )
+        if pts_curr is None or status is None:
+            return None, None
+
+        good = status.ravel().astype(bool)
+        if good.sum() < 8:
+            return None, None
+
+        return pts_prev[good].reshape(-1, 2), pts_curr[good].reshape(-1, 2)
+
+    def _orb_match(
+        self, gray_prev: np.ndarray, gray_curr: np.ndarray
+    ) -> tuple:
+        """ORB + BFMatcher + Lowe ratio. LK'nın başarısız olduğu durumlarda fallback."""
+        kp1, d1 = self._orb.detectAndCompute(gray_prev, None)
+        kp2, d2 = self._orb.detectAndCompute(gray_curr, None)
+        if d1 is None or d2 is None or len(kp1) < 8 or len(kp2) < 8:
+            return None, None
+        raw = self._matcher.knnMatch(d1, d2, k=2)
+        good = [m for pair in raw if len(pair) == 2
+                for m, n_m in [pair] if m.distance < self._lowe_ratio * n_m.distance]
+        if len(good) < 8:
+            return None, None
+        pts1 = np.float32([kp1[m.queryIdx].pt for m in good])
+        pts2 = np.float32([kp2[m.trainIdx].pt for m in good])
+        # Seed LK points from ORB matches for next frame
+        self._lk_pts = pts2.reshape(-1, 1, 2)
+        return pts1, pts2
 
     def _select_best_decomp(self, Rs, ts, normals, pts1, pts2, mask):
         """

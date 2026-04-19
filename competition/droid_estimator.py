@@ -4,29 +4,30 @@ droid_estimator.py — DROID-SLAM tabanlı online pozisyon tahmincisi
 OnlineEstimator (ORB tabanlı) ile aynı update() arayüzü.
 DROID-SLAM veya CUDA mevcut değilse OnlineEstimator'a otomatik fallback.
 
+Mimari:
+    Video Frame
+      → DROID-SLAM track()       (keyframe bazlı derin öğrenme VO)
+      → video.poses[:3] oku      (tx,ty,tz — DROID iç koordinat sistemi)
+      → Sim3Aligner              (health=1 çiftleriyle DROID→dünya hizalama)
+      → Dünya pozisyonu (metre)
+
 Gereksinimler:
-    - CUDA GPU
-    - DROID-SLAM submodule kurulu: DROID-SLAM/droid_slam/
-    - Model ağırlıkları: DROID-SLAM/droid.pth
-    - Bağımlılıklar: torch, lietorch, evo
+    conda env: droid_clean
+    - torch >= 2.0 (CUDA)
+    - lietorch
+    - DROID-SLAM submodule: DROID-SLAM/droid_slam/
+    - Model ağırlıkları: DROID-SLAM/checkpoints/droid.pth
 
 Kullanım:
     from competition.droid_estimator import DROIDEstimator
-
     est = DROIDEstimator(fx=463, fy=462, cx=318, cy=186)
     x, y, z = est.update(frame, ref_pos, health)
     print(est.backend_name)  # "droid" veya "orb_fallback"
-
-DROID-SLAM'dan per-frame pose alma stratejisi:
-    - Her track() çağrısından sonra video.poses tensörünü oku
-    - Son keyframe'in SE3 pozu → kamera koordinatlarından dünya koordinatlarına
-    - Sim3 hizalaması OnlineEstimator altyapısıyla aynı şekilde
 """
 
 from __future__ import annotations
 
 import logging
-import math
 import os
 import sys
 from typing import Optional
@@ -36,36 +37,30 @@ import numpy as np
 
 log = logging.getLogger(__name__)
 
-_REPO = os.path.expanduser("~/code/uav-visual-odometry")
-_DROID_DIR = os.path.join(_REPO, "DROID-SLAM")
-_DROID_WEIGHTS = os.path.join(_DROID_DIR, "droid.pth")
+_REPO        = os.path.expanduser("~/code/uav-visual-odometry")
+_DROID_DIR   = os.path.join(_REPO, "DROID-SLAM")
+_DROID_WEIGHTS = os.path.join(_DROID_DIR, "checkpoints", "droid.pth")
 
 
 def _try_import_droid():
-    """DROID-SLAM import dene. Başarısızsa None döndür."""
+    """DROID-SLAM import dene. Başarısızsa (None, None) döndür."""
     try:
         import torch
         if not torch.cuda.is_available():
-            log.info("[DROID] CUDA yok — fallback'e geçiliyor")
+            log.info("[DROID] CUDA yok — ORB fallback")
             return None, None
-
         if not os.path.exists(_DROID_WEIGHTS):
-            log.info(f"[DROID] Ağırlık dosyası bulunamadı: {_DROID_WEIGHTS} — fallback")
+            log.info(f"[DROID] Ağırlık bulunamadı: {_DROID_WEIGHTS} — ORB fallback")
             return None, None
 
-        # DROID-SLAM dizinini sys.path'e ekle
-        droid_slam_dir = os.path.join(_DROID_DIR, "droid_slam")
-        if droid_slam_dir not in sys.path:
-            sys.path.insert(0, droid_slam_dir)
-        if _DROID_DIR not in sys.path:
-            sys.path.insert(0, _DROID_DIR)
+        for p in [os.path.join(_DROID_DIR, "droid_slam"), _DROID_DIR]:
+            if p not in sys.path:
+                sys.path.insert(0, p)
 
         from droid import Droid
-        import lietorch
         return torch, Droid
-
     except ImportError as e:
-        log.info(f"[DROID] Import başarısız: {e} — fallback'e geçiliyor")
+        log.info(f"[DROID] Import başarısız ({e}) — ORB fallback")
         return None, None
 
 
@@ -73,17 +68,11 @@ class DROIDEstimator:
     """
     DROID-SLAM tabanlı online pozisyon tahmincisi.
 
-    DROID kullanılamıyorsa OnlineEstimator'a (ORB) otomatik fallback.
-    Her iki durumda da aynı update() arayüzü.
+    health=1 → referans pozisyonu direkt döndür (optimal strateji, sıfır hata).
+              Aynı zamanda DROID'i besle + Sim3 kalibrasyon çifti ekle.
+    health=0 → DROID'den okunan son pozu Sim3 ile dünya koordinatına çevir.
 
-    Parameters
-    ----------
-    fx, fy, cx, cy   : kamera intrinsik (orijinal veya resize sonrası)
-    dist_coeffs      : distorsiyon katsayıları (undistort için)
-    altitude_m       : bilinen irtifa (metrik ölçek için)
-    image_size       : DROID resize hedefi [H, W] (varsayılan [240, 320])
-    buffer_size      : DROID buffer (RAM/VRAM trade-off)
-    force_orb        : True → her zaman ORB fallback kullan (test için)
+    health 0→1 geçişi: T_world sıfırla + Sim3 yeniden kalibre et (OnlineEstimator ile aynı).
     """
 
     def __init__(
@@ -98,20 +87,17 @@ class DROIDEstimator:
         buffer_size: int = 512,
         force_orb: bool = False,
     ):
-        self._fx = fx
-        self._fy = fy
-        self._cx = cx
-        self._cy = cy
-
-        self._torch = None
-        self._droid = None
-        self._use_droid = False
+        self._fx, self._fy = fx, fy
+        self._cx, self._cy = cx, cy
         self._frame_count = 0
+        self._use_droid   = False
+        self._droid       = None
+        self._torch       = None
 
         if not force_orb:
             torch_mod, Droid = _try_import_droid()
-            if torch_mod is not None and Droid is not None:
-                self._torch = torch_mod
+            if torch_mod is not None:
+                self._torch     = torch_mod
                 self._use_droid = True
                 self._init_droid(Droid, image_size or [240, 320], buffer_size,
                                  fx, fy, cx, cy)
@@ -122,44 +108,51 @@ class DROIDEstimator:
     # ── Başlatıcılar ──────────────────────────────────────────────────────────
 
     def _init_droid(self, Droid, image_size, buffer_size, fx, fy, cx, cy):
-        """DROID-SLAM nesnesini başlat."""
         import argparse
         args = argparse.Namespace(
-            weights      = _DROID_WEIGHTS,
-            image_size   = image_size,
-            buffer       = buffer_size,
-            stereo       = False,
-            disable_vis  = True,
-            filter_thresh= 2.4,
-            beta         = 0.3,
-            warmup       = 8,
-            keyframe_thresh = 4.0,
-            frontend_thresh = 16.0,
-            frontend_window = 25,
-            frontend_radius = 2,
-            frontend_nms    = 1,
-            backend_thresh  = 22.5,
-            backend_radius  = 2,
-            backend_nms     = 3,
-            upsample        = False,
+            weights          = _DROID_WEIGHTS,
+            image_size       = image_size,
+            buffer           = buffer_size,
+            stereo           = False,
+            disable_vis      = True,
+            filter_thresh    = 2.4,
+            beta             = 0.3,
+            warmup           = 8,
+            keyframe_thresh  = 4.0,
+            frontend_thresh  = 16.0,
+            frontend_window  = 25,
+            frontend_radius  = 2,
+            frontend_nms     = 1,
+            backend_thresh   = 22.5,
+            backend_radius   = 2,
+            backend_nms      = 3,
+            upsample         = False,
         )
         try:
-            self._droid = Droid(args)
-            # İntrinsik tensör (DROID formatı: fx, fy, cx, cy)
-            self._intrinsics = self._torch.as_tensor(
+            self._droid       = Droid(args)
+            self._intrinsics  = self._torch.as_tensor(
                 [fx, fy, cx, cy], dtype=self._torch.float
             ).cuda()
-            self._image_size = image_size
-            # Kümülatif poz (son bilinen)
-            self._last_pose = np.zeros(3, dtype=np.float64)
-            log.info(f"[DROID] Başlatıldı: image_size={image_size} buffer={buffer_size}")
+            self._image_size  = image_size
+
+            # Sim3 hizalama (DROID iç koordinat → dünya/metre)
+            from competition.sim3_aligner import Sim3Aligner
+            self._sim3        = Sim3Aligner(min_pairs=5, update_every=10, window_size=80)
+            self._calib_droid: list = []   # (droid_pos_3d, ref_pos_3d) çiftleri
+            self._calib_ref:   list = []
+
+            # Durum
+            self._last_droid_pos = np.zeros(3, dtype=np.float64)
+            self._last_world_pos = np.zeros(3, dtype=np.float64)
+            self._prev_health    = 1
+
+            log.info(f"[DROID] Başlatıldı — image_size={image_size} buffer={buffer_size}")
         except Exception as e:
-            log.warning(f"[DROID] Başlatma hatası: {e} — ORB fallback'e geçiliyor")
+            log.warning(f"[DROID] Başlatma hatası ({e}) — ORB fallback")
             self._use_droid = False
-            self._init_orb_fallback(fx, fy, cx, cy, None, None)
+            self._init_orb_fallback(self._fx, self._fy, self._cx, self._cy, None, None)
 
     def _init_orb_fallback(self, fx, fy, cx, cy, dist_coeffs, altitude_m):
-        """ORB tabanlı OnlineEstimator'ı başlat."""
         from competition.estimator import OnlineEstimator
         dist_arr = (np.array(dist_coeffs, dtype=np.float64)
                     if dist_coeffs is not None else None)
@@ -180,95 +173,85 @@ class DROIDEstimator:
     def backend_name(self) -> str:
         return "droid" if self._use_droid else "orb_fallback"
 
-    def update(
-        self,
-        frame: np.ndarray,
-        ref_pos: Optional[tuple],
-        health: int,
-    ) -> tuple:
-        """
-        Yeni kare işle — OnlineEstimator ile aynı imza.
-
-        Parameters
-        ----------
-        frame   : BGR görüntü (numpy ndarray)
-        ref_pos : (x, y, z) metre | health=0'da None
-        health  : 1 = referans güvenilir, 0 = GPS-siz mod
-
-        Returns
-        -------
-        (est_x, est_y, est_z) metre
-        """
+    def update(self, frame: np.ndarray, ref_pos: Optional[tuple], health: int) -> tuple:
         self._frame_count += 1
-
         if self._use_droid:
             return self._update_droid(frame, ref_pos, health)
-        else:
-            return self._orb.update(frame, ref_pos, health)
+        return self._orb.update(frame, ref_pos, health)
 
     def get_state(self) -> dict:
-        """Tanılama bilgisi — OnlineEstimator.get_state() ile uyumlu."""
-        if self._use_droid:
-            return {
-                "frame":           self._frame_count,
-                "backend":         "droid",
-                "calibrated":      True,
-                "sim3_n_pairs":    0,
-                "sim3_scale":      1.0,
-                "sim3_rmse":       0.0,
-                "world_x":         float(self._last_pose[0]),
-                "world_y":         float(self._last_pose[1]),
-                "ema_x":           float(self._last_pose[0]),
-                "ema_y":           float(self._last_pose[1]),
-                "confidence":      1.0,
-                "drift_rejected":  0,
-                "last_inliers":    0,
-                "jump_threshold":  0.0,
-                "median_vel_m":    0.0,
-                "health0_streak":  0,
-                "calib_pairs_raw": 0,
-            }
-        else:
-            state = self._orb.get_state()
-            state["backend"] = "orb_fallback"
-            return state
+        if not self._use_droid:
+            s = self._orb.get_state()
+            s["backend"] = "orb_fallback"
+            return s
+        return {
+            "frame":           self._frame_count,
+            "backend":         "droid",
+            "calibrated":      self._sim3.calibrated,
+            "sim3_n_pairs":    self._sim3.n_pairs,
+            "sim3_scale":      round(self._sim3.scale, 3),
+            "sim3_rmse":       round(self._sim3.rmse_calib, 4) if not __import__('math').isnan(self._sim3.rmse_calib) else float('nan'),
+            "world_x":         float(self._last_world_pos[0]),
+            "world_y":         float(self._last_world_pos[1]),
+            "ema_x":           float(self._last_world_pos[0]),
+            "ema_y":           float(self._last_world_pos[1]),
+            "confidence":      1.0,
+            "drift_rejected":  0,
+            "last_inliers":    0,
+            "jump_threshold":  0.0,
+            "median_vel_m":    0.0,
+            "health0_streak":  0,
+            "calib_pairs_raw": len(self._calib_droid),
+        }
 
     # ── DROID iç implementasyonu ──────────────────────────────────────────────
 
     def _update_droid(self, frame: np.ndarray, ref_pos, health: int) -> tuple:
-        """
-        DROID-SLAM üzerinden pose tahmin et.
+        # Health 0→1 geçişi: Sim3 sıfırla (OnlineEstimator ile aynı strateji)
+        if health == 1 and self._prev_health == 0:
+            from competition.sim3_aligner import Sim3Aligner
+            self._sim3       = Sim3Aligner(min_pairs=5, update_every=10, window_size=80)
+            self._calib_droid.clear()
+            self._calib_ref.clear()
+            log.debug(f"[DROID] health 0→1 frame={self._frame_count}: Sim3 sıfırlandı")
+        self._prev_health = health
 
-        health=1: referans pozisyonu direkt döndür (optimal strateji).
-        health=0: DROID'den okunan son kamera pozunu Sim3 ile world frame'e çevir.
-        """
+        # Frame'i DROID'e besle
+        self._feed_to_droid(frame)
+
+        # Mevcut DROID pozunu oku
+        droid_pos = self._read_droid_pos()
+        if droid_pos is not None:
+            self._last_droid_pos = droid_pos
+
         if health == 1 and ref_pos is not None:
-            # Optimal strateji: referansı direkt gönder
-            self._last_pose = np.array(ref_pos[:3], dtype=np.float64)
-            # Yine de DROID'e frame'i besle (kalibrasyon sürsün)
-            self._feed_to_droid(frame)
+            # Kalibrasyon çifti ekle
+            self._sim3.add(self._last_droid_pos,
+                           np.array(ref_pos[:3], dtype=np.float64))
+            # Optimal strateji: referansı direkt döndür
+            self._last_world_pos = np.array(ref_pos[:3], dtype=np.float64)
             return float(ref_pos[0]), float(ref_pos[1]), float(ref_pos[2])
 
-        # health=0: DROID tahmini
-        self._feed_to_droid(frame)
-        pose = self._read_droid_pose()
-        if pose is not None:
-            self._last_pose = pose
-        return float(self._last_pose[0]), float(self._last_pose[1]), float(self._last_pose[2])
+        # health=0: Sim3 ile dünya pozisyonu
+        if self._sim3.calibrated:
+            wp = self._sim3.apply(self._last_droid_pos)
+            self._last_world_pos = wp
+        # Sim3 henüz kalibrasyon olmadıysa son bilinen pozda kal
+        return (float(self._last_world_pos[0]),
+                float(self._last_world_pos[1]),
+                float(self._last_world_pos[2]))
 
     def _frame_to_tensor(self, frame: np.ndarray):
-        """BGR numpy → DROID formatı: [1, 3, H, W] float tensor (CUDA)."""
-        h_target, w_target = self._image_size
-        resized = cv2.resize(frame, (w_target, h_target))
-        tensor = (self._torch.as_tensor(resized)
-                  .permute(2, 0, 1)        # HWC → CHW
-                  .float()
-                  .unsqueeze(0)            # batch dim
-                  .cuda())
-        return tensor
+        """BGR numpy → DROID: [1, 3, H, W] float CUDA tensör."""
+        h, w = self._image_size
+        img  = cv2.resize(frame, (w, h))
+        return (self._torch.as_tensor(img)
+                .permute(2, 0, 1)
+                .float()
+                .unsqueeze(0)
+                .cuda())
 
     def _feed_to_droid(self, frame: np.ndarray) -> None:
-        """Frame'i DROID pipeline'ına besle."""
         try:
             img_t = self._frame_to_tensor(frame)
             self._droid.track(self._frame_count, img_t,
@@ -276,55 +259,18 @@ class DROIDEstimator:
         except Exception as e:
             log.debug(f"[DROID] track hatası frame={self._frame_count}: {e}")
 
-    def _read_droid_pose(self) -> Optional[np.ndarray]:
+    def _read_droid_pos(self) -> Optional[np.ndarray]:
         """
-        DROID video buffer'dan son mevcut kamera pozunu oku.
-
-        Döndürür: (3,) dünya koordinatı (metre) veya None
+        DROID video buffer'dan son keyframe'in translasyon vektörünü oku.
+        Poses formatı: [tx, ty, tz, qx, qy, qz, qw] (identity = [0,0,0,0,0,0,1])
         """
         try:
-            # video.poses: [N, 7] — SE3 (quaternion + translation), lietorch formatı
-            # video.counter: kaç keyframe işlendiği
             counter = self._droid.video.counter.value
             if counter < 1:
                 return None
-
-            # Son keyframe'in pozunu al
-            poses = self._droid.video.poses
-            last_idx = min(counter - 1, poses.shape[0] - 1)
-            pose_se3 = poses[last_idx]  # [7] tensor
-
-            # SE3 → translasyon (DROID camera frame, birim belirsiz)
-            # pose_se3[:3] = quaternion (qx, qy, qz, qw formatı), pose_se3[3:] = xyz
-            # Uyarı: DROID poses formatı [tx, ty, tz, qx, qy, qz, qw] DEĞİL
-            # lietorch SE3: log map kullanılır; doğrudan data() ile xyz alınır
-            import lietorch
-            T = lietorch.SE3(pose_se3[None])  # batch dim ekle
-            xyz = T.translation().squeeze().cpu().numpy()  # (3,)
-
-            # Kamera frame'den dünya frame'e (nadir kamera: z ileri, x sağ, y aşağı)
-            # Basit: tx, ty, tz'yi direkt kullan (Sim3 hizalaması zaten yapılacak)
-            return xyz.astype(np.float64)
-
+            idx  = min(counter - 1, self._droid.video.poses.shape[0] - 1)
+            pose = self._droid.video.poses[idx].cpu().numpy()  # (7,)
+            return pose[:3].astype(np.float64)                 # (tx, ty, tz)
         except Exception as e:
             log.debug(f"[DROID] pose okuma hatası: {e}")
-            return None
-
-    def terminate(self) -> Optional[np.ndarray]:
-        """
-        DROID global bundle adjustment çalıştır, tüm pozları döndür.
-
-        Döndürür: (N, 3) pozisyon dizisi veya None
-        """
-        if not self._use_droid or self._droid is None:
-            return None
-        try:
-            import lietorch
-            traj = self._droid.terminate()
-            # traj: [N, 7] SE3 tensör
-            T = lietorch.SE3(self._torch.as_tensor(traj))
-            xyz = T.translation().cpu().numpy()  # (N, 3)
-            return xyz
-        except Exception as e:
-            log.warning(f"[DROID] terminate hatası: {e}")
             return None

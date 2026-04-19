@@ -201,7 +201,7 @@ def run_evaluation(
             altitude_m=altitude_m,
             n_features=1000,
             sim3_min_pairs=5,
-            sim3_update_every=20,
+            sim3_update_every=1,
             max_jump_m=8.0,
         )
 
