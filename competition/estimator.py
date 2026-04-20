@@ -78,7 +78,7 @@ class OnlineEstimator:
         n_features: int = 1500,
         lowe_ratio: float = 0.75,
         ransac_thresh: float = 2.0,
-        ema_alpha: float = 0.7,
+        ema_alpha: float = 0.025,
         max_jump_m: float = 3.0,
         adaptive_drift: bool = True,
         sim3_min_pairs: int = 10,
@@ -365,14 +365,15 @@ class OnlineEstimator:
         EMA uygula. health=1'de hızlı yakınsama (gecikmesiz);
         health=0'da standart smoothing.
         """
-        a = self.ema_alpha if health == 0 else min(self.ema_alpha + 0.2, 1.0)
+        a  = self.ema_alpha if health == 0 else 0.9  # health=1: fast GPS convergence
+        az = min(a, 0.01)   if health == 0 else 0.9  # stronger Z smoothing during health=0
         if not self._ema_init:
             self._ema_x, self._ema_y, self._ema_z = wx, wy, wz
             self._ema_init = True
         else:
-            self._ema_x = a * wx + (1 - a) * self._ema_x
-            self._ema_y = a * wy + (1 - a) * self._ema_y
-            self._ema_z = a * wz + (1 - a) * self._ema_z
+            self._ema_x = a  * wx + (1 - a)  * self._ema_x
+            self._ema_y = a  * wy + (1 - a)  * self._ema_y
+            self._ema_z = az * wz + (1 - az) * self._ema_z
 
     def _adaptive_jump_threshold(self) -> float:
         """
@@ -537,7 +538,7 @@ class OnlineEstimator:
 
         pts2, status, _ = cv2.calcOpticalFlowPyrLK(
             gray_prev, gray_curr, pts, None,
-            winSize=(15, 15), maxLevel=2,
+            winSize=(21, 21), maxLevel=2,
         )
         if pts2 is None or status is None:
             return 0.0
@@ -666,17 +667,32 @@ class OnlineEstimator:
         criteria_sp = (cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER, 30, 0.001)
         pts_prev = cv2.cornerSubPix(gray_prev, pts_prev, (5, 5), (-1, -1), criteria_sp)
 
-        pts_curr, status, _ = cv2.calcOpticalFlowPyrLK(
+        pts_curr, status_fwd, _ = cv2.calcOpticalFlowPyrLK(
             gray_prev, gray_curr, pts_prev, None, **self._lk_params
         )
-        if pts_curr is None or status is None:
+        if pts_curr is None or status_fwd is None:
             return None, None
 
-        good = status.ravel().astype(bool)
-        if good.sum() < 8:
+        good_fwd = status_fwd.ravel().astype(bool)
+        if good_fwd.sum() < 8:
             return None, None
 
-        return pts_prev[good].reshape(-1, 2), pts_curr[good].reshape(-1, 2)
+        # Forward-backward consistency: track back and reject inconsistent points
+        pts_back, status_bwd, _ = cv2.calcOpticalFlowPyrLK(
+            gray_curr, gray_prev, pts_curr, None, **self._lk_params
+        )
+        if pts_back is not None and status_bwd is not None:
+            good_bwd = status_bwd.ravel().astype(bool)
+            fb_err = np.linalg.norm(
+                pts_prev.reshape(-1, 2) - pts_back.reshape(-1, 2), axis=1
+            )
+            fb_good = fb_err < 1.5
+            good_all = good_fwd & good_bwd & fb_good
+            if good_all.sum() >= 8:
+                return pts_prev[good_all].reshape(-1, 2), pts_curr[good_all].reshape(-1, 2)
+
+        # Fallback: forward-only if FB leaves too few points
+        return pts_prev[good_fwd].reshape(-1, 2), pts_curr[good_fwd].reshape(-1, 2)
 
     def _orb_match(
         self, gray_prev: np.ndarray, gray_curr: np.ndarray
