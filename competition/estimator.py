@@ -88,6 +88,8 @@ class OnlineEstimator:
         sim3_robust_sigma: Optional[float] = 1.5,
         health0_freeze_after: Optional[int] = None,
         max_anchor_drift_m: Optional[float] = None,
+        affine_alpha: float = 0.7,
+        h0_reset_min: int = 0,
     ):
         # 4.1 Kamera matrisi
         self.K = np.array([[fx,  0.0, cx],
@@ -143,6 +145,15 @@ class OnlineEstimator:
         self._max_anchor_drift_m: Optional[float] = max_anchor_drift_m
         self._last_ref_anchor: Optional[tuple] = None  # last confirmed health=1 position
 
+        # Affine scale tracking: per-keyframe altitude change estimation.
+        # estimateAffinePartial2D gives pixel-level scale ratio s between frames.
+        # Product of all s values tracks cumulative altitude change:
+        #   s_product < 1 → UAV rose (features smaller) → VO underestimates displacement
+        #   s_product > 1 → UAV descended (features larger) → VO overestimates
+        self._affine_scale_product: float = 1.0
+        self._affine_scale_at_sim3_calib: float = 1.0  # scale product when Sim3 last updated
+        self._affine_alpha: float = affine_alpha  # correction exponent (0=off, 1=full)
+
         # Ham kalibrasyon çiftleri (robust weighting için saklanır)
         self._calib_vo:  list[np.ndarray] = []
         self._calib_ref: list[np.ndarray] = []
@@ -176,6 +187,15 @@ class OnlineEstimator:
         self._health0_count = 0   # art arda health=0 frame sayısı
         self._prev_health   = 1   # reset-on-health1 için önceki health durumu
 
+        # Warm Sim3 initialization: inherited scale/rotation from previous calibration.
+        # Populated just before each Sim3 reset; consumed on first _add_calib_pair call.
+        # Enables usable estimates even after very short health=1 flashes (1-4 frames)
+        # that don't accumulate enough pairs for a full Umeyama re-fit.
+        self._inherited_s: float | None = None
+        self._inherited_R: np.ndarray | None = None
+        self._h0_reset_min: int = h0_reset_min
+        self._h0_consec: int = 0  # consecutive health=0 frames in current block
+
     # ── Public API ────────────────────────────────────────────────────────────
 
     def update(
@@ -203,7 +223,19 @@ class OnlineEstimator:
         # ── Health 0→1 geçişi: tam sıfırlama ────────────────────────────────────
         # Birikmiş VO drift'i bir sonraki health=0 segmentine taşıma.
         # T_world identity'ye döner; Sim3 ve kalibrasyon verisi temizlenir.
+        # scale/rotation miras alınır → çok kısa health=1 flashlerinde bile
+        # Sim3 makul tahmin üretebilir (warm initialization).
         if health == 1 and self._prev_health == 0 and self._keyframe_gray is not None:
+            # Inherit scale/rotation before wiping the Sim3.
+            # After T_world reset the first GPS pair updates translation via
+            # warm-init, so even 1-2 health=1 frames give a usable calibration.
+            if self._sim3.calibrated:
+                self._inherited_s: float | None = self._sim3._s
+                self._inherited_R: np.ndarray | None = self._sim3._R.copy()
+            else:
+                self._inherited_s = None
+                self._inherited_R = None
+            self._h0_consec = 0
             self._T_world      = np.eye(4, dtype=np.float64)
             self._last_valid_T = None
             self._sim3         = Sim3Aligner(
@@ -218,7 +250,11 @@ class OnlineEstimator:
             self._vel_vec_history.clear()
             self._lk_pts = None
             self._health0_count = 0
+            self._affine_scale_product = 1.0
+            self._affine_scale_at_sim3_calib = 1.0
             log.debug(f"[Reset] health 0→1 frame={self._frame_count}: tam sıfırlama")
+        if health == 0:
+            self._h0_consec += 1
         self._prev_health = health
 
         # ── İlk kare: keyframe başlat ─────────────────────────────────────────
@@ -289,6 +325,21 @@ class OnlineEstimator:
             new_wx = float(wp[0])
             new_wy = float(wp[1])
             new_wz = float(wp[2])
+            # Altitude-adaptive scale correction (health=0 only):
+            # As the UAV climbs, apparent feature motion shrinks → VO underestimates
+            # displacement. The cumulative affine scale product tracks this:
+            #   altitude_ratio = affine_scale_product / scale_at_last_sim3_update
+            #   < 1: UAV rose → divide by ratio to INCREASE displacement estimate
+            #   > 1: UAV descended → divide to DECREASE
+            if (health == 0
+                    and self._affine_alpha > 0
+                    and self._last_ref_anchor is not None
+                    and self._affine_scale_at_sim3_calib > 0):
+                altitude_ratio = self._affine_scale_product / self._affine_scale_at_sim3_calib
+                altitude_ratio = float(np.clip(altitude_ratio, 0.2, 5.0)) ** self._affine_alpha
+                ax, ay = self._last_ref_anchor[0], self._last_ref_anchor[1]
+                new_wx = ax + (new_wx - ax) / altitude_ratio
+                new_wy = ay + (new_wy - ay) / altitude_ratio
         else:
             new_wx, new_wy, new_wz = self._world_x, self._world_y, self._world_z
 
@@ -429,6 +480,25 @@ class OnlineEstimator:
         Sim(3) kalibrasyon çifti ekle. Robust weighting aktifse Huber-ağırlıklı
         yeniden kalibrasyon çalıştırır (outlier çiftler downweight edilir).
         """
+        # Warm initialization: on the FIRST pair after a reset, apply inherited
+        # scale+rotation and compute translation from this GPS anchor.
+        # This lets Sim3 produce usable estimates even after a 1-2 frame health=1
+        # flash that doesn't accumulate enough pairs for full Umeyama fitting.
+        if (not self._sim3.calibrated
+                and getattr(self, '_inherited_s', None) is not None):
+            warm_t = ref_pos - self._inherited_s * (self._inherited_R @ vo_pos)
+            self._sim3._s = self._inherited_s
+            self._sim3._R = self._inherited_R
+            self._sim3._t = warm_t
+            self._sim3._calibrated = True
+            # Protect inherited scale/rotation from being overridden by a
+            # degenerate Umeyama fit on the first few short-baseline pairs.
+            # After h0_reset_min pairs, normal Umeyama updates resume.
+            self._sim3.set_alignment_lock(self._h0_reset_min)
+            self._inherited_s = None  # consume once
+            self._inherited_R = None
+            log.debug(f"[WarmSim3] frame={self._frame_count}: inherited s={self._sim3._s:.3f}")
+
         self._calib_vo.append(vo_pos.copy())
         self._calib_ref.append(ref_pos.copy())
 
@@ -440,6 +510,10 @@ class OnlineEstimator:
                 self._sim3.add(vo_pos, ref_pos)
         else:
             self._sim3.add(vo_pos, ref_pos)
+
+        # Track affine scale at the time of each Sim3 update
+        if self._sim3.calibrated:
+            self._affine_scale_at_sim3_calib = self._affine_scale_product
 
     def _robust_refit(self) -> None:
         """
@@ -614,6 +688,18 @@ class OnlineEstimator:
         flow = pts2 - pts1
         if float(np.mean(np.abs(flow))) < 0.5:
             return None, None, 0, T_eye
+
+        # ── 2b. Affine scale tracking (altitude change estimation) ────────────
+        # estimateAffinePartial2D gives 4-DOF transform: scale, rotation, tx, ty
+        # The scale ratio s tracks how feature density changes → proxy for altitude ratio
+        M_aff, _ = cv2.estimateAffinePartial2D(
+            pts1.reshape(-1, 1, 2), pts2.reshape(-1, 1, 2),
+            method=cv2.RANSAC, ransacReprojThreshold=self._ransac_thr,
+        )
+        if M_aff is not None:
+            s_aff = math.sqrt(float(M_aff[0, 0]) ** 2 + float(M_aff[1, 0]) ** 2)
+            if 0.5 < s_aff < 2.0:  # sanity check: reject impossible scale jumps
+                self._affine_scale_product *= s_aff
 
         # ── 3. RANSAC + Homography ────────────────────────────────────────────
         H, mask_h = cv2.findHomography(pts1, pts2, cv2.RANSAC, self._ransac_thr)

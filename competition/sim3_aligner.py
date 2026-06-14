@@ -105,6 +105,7 @@ class Sim3Aligner:
 
         self._pairs: list[tuple[np.ndarray, np.ndarray]] = []
         self._calibrated = False
+        self._align_lock: int = 0  # block alignment for N more pairs (warm-init guard)
 
         # Sim(3) parametreleri
         self._s = 1.0
@@ -115,6 +116,12 @@ class Sim3Aligner:
 
     # ── Veri ekleme ve kalibrasyon ─────────────────────────────────────────────
 
+    def set_alignment_lock(self, n_pairs: int) -> None:
+        """Block Umeyama re-fitting for the next n_pairs additions.
+        Used after warm initialization to protect inherited scale/rotation
+        from being overridden by a degenerate short-baseline fit."""
+        self._align_lock = n_pairs
+
     def add(self, vo_pos: np.ndarray, ref_pos: np.ndarray) -> None:
         """
         Yeni (VO, referans) pozisyon çifti ekle.
@@ -124,6 +131,10 @@ class Sim3Aligner:
         """
         self._pairs.append((np.asarray(vo_pos, dtype=np.float64).copy(),
                             np.asarray(ref_pos, dtype=np.float64).copy()))
+
+        if self._align_lock > 0:
+            self._align_lock -= 1
+            return  # protect warm-init params from short-baseline Umeyama override
 
         n = len(self._pairs)
         if n >= self.min_pairs and (

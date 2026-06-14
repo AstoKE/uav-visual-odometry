@@ -145,6 +145,7 @@ def run_evaluation(
     freeze_after: Optional[int] = None,
     max_anchor_drift_m: Optional[float] = None,
     max_jump_m: float = 8.0,
+    affine_alpha: float = 0.7,
 ) -> dict:
     """
     Video üzerinde OnlineEstimator çalıştır, metrikleri hesapla.
@@ -210,6 +211,7 @@ def run_evaluation(
             min_keyframe_flow_px=kf_flow,
             health0_freeze_after=freeze_after,
             max_anchor_drift_m=max_anchor_drift_m,
+            affine_alpha=affine_alpha,
         )
 
     rows      = []
@@ -540,6 +542,8 @@ def main():
                         help="N art arda health=0 kare sonrası pozisyonda don (None=kapalı)")
     parser.add_argument("--max_anchor_drift", type=float, default=None,
                         help="Son health=1 noktasından max sapma (m). Aşılırsa don (None=kapalı)")
+    parser.add_argument("--affine_alpha", type=float, default=0.7,
+                        help="Affine altitude düzeltme kuvveti (0=kapalı, 1=tam, varsayılan: 0.7)")
     args = parser.parse_args()
 
     # Veri yükle
@@ -587,6 +591,7 @@ def main():
         max_jump_m=args.max_jump,
         freeze_after=args.freeze_after,
         max_anchor_drift_m=args.max_anchor_drift,
+        affine_alpha=args.affine_alpha,
     )
 
 
