@@ -1,8 +1,0 @@
-scale_x=3.3137
-scale_y=0.0000
-RMSE_x=5.6662 m
-RMSE_y=0.5282 m
-RMSE_2D=5.6907 m
-Procrustes=11.44°
-imp_vs_global=16.6%
-imp_vs_baseline=56.2%

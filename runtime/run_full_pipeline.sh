@@ -183,8 +183,8 @@ fi
 if [[ -z "$SKIP_SLAM" ]]; then
   step "ADIM 5/7 — DROID-SLAM"
 
-  DROID_SCRIPT="$REPO/slam/scripts/run_droid_figure8_v3.sh"
   DROID_CKPT="$REPO/DROID-SLAM/checkpoints/droid.pth"
+  DROID_CALIB="$REPO/dataset/meta/calib.txt"
 
   if [[ ! -f "$DROID_CKPT" ]]; then
     warn "DROID checkpoint bulunamadı: $DROID_CKPT"
@@ -195,9 +195,12 @@ if [[ -z "$SKIP_SLAM" ]]; then
     SKIP_SLAM=1
   else
     info "DROID-SLAM başlatılıyor (conda env: $CONDA_ENV)..."
-    RUN "conda run -n '$CONDA_ENV' bash '$DROID_SCRIPT' \
-         --images '$PROCESSED_DIR' \
-         --out '$SLAM_OUT' \
+    RUN "conda run -n '$CONDA_ENV' python '$REPO/DROID-SLAM/demo.py' \
+         --imagedir '$PROCESSED_DIR' \
+         --calib '$DROID_CALIB' \
+         --weights '$DROID_CKPT' \
+         --trajectory_path '$SLAM_OUT' \
+         --disable_vis \
          > '$LOG_DIR/droid.log' 2>&1"
     ok "DROID-SLAM tamamlandı → $SLAM_OUT"
   fi
