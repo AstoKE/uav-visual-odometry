@@ -87,6 +87,7 @@ class OnlineEstimator:
         altitude_m: Optional[float] = None,
         sim3_robust_sigma: Optional[float] = 1.5,
         health0_freeze_after: Optional[int] = None,
+        max_anchor_drift_m: Optional[float] = None,
     ):
         # 4.1 Kamera matrisi
         self.K = np.array([[fx,  0.0, cx],
@@ -139,6 +140,8 @@ class OnlineEstimator:
         )
         self._sim3_robust_sigma: float | None = sim3_robust_sigma
         self._health0_freeze_after: Optional[int] = health0_freeze_after
+        self._max_anchor_drift_m: Optional[float] = max_anchor_drift_m
+        self._last_ref_anchor: Optional[tuple] = None  # last confirmed health=1 position
 
         # Ham kalibrasyon çiftleri (robust weighting için saklanır)
         self._calib_vo:  list[np.ndarray] = []
@@ -211,8 +214,10 @@ class OnlineEstimator:
             self._calib_vo.clear()
             self._calib_ref.clear()
             self._pos_history.clear()
+            self._vel_history.clear()
             self._vel_vec_history.clear()
             self._lk_pts = None
+            self._health0_count = 0
             log.debug(f"[Reset] health 0→1 frame={self._frame_count}: tam sıfırlama")
         self._prev_health = health
 
@@ -278,6 +283,7 @@ class OnlineEstimator:
             new_wx = float(ref_pos[0])
             new_wy = float(ref_pos[1])
             new_wz = float(ref_pos[2])
+            self._last_ref_anchor = (new_wx, new_wy, new_wz)  # anchor güncelle
         elif self._sim3.calibrated:
             wp     = self._sim3.apply(vo_pos)
             new_wx = float(wp[0])
@@ -287,6 +293,7 @@ class OnlineEstimator:
             new_wx, new_wy, new_wz = self._world_x, self._world_y, self._world_z
 
         # ── 4.4 Adaptive drift detection + rollback ───────────────────────────
+        _was_extrapolated = False
         if health == 0 and self._sim3.calibrated and self._pos_history and rel_R is not None:
             threshold = self._adaptive_jump_threshold()
             jump = math.sqrt((new_wx - self._world_x) ** 2 +
@@ -294,22 +301,41 @@ class OnlineEstimator:
             if jump > threshold:
                 self._drift_rejected += 1
                 self._T_world = self._T_world @ np.linalg.inv(T_rel)
-                # Donmak yerine hız vektörüyle extrapolation
-                new_wx, new_wy, new_wz = self._extrapolate_position()
+                # Extrapolate from velocity; if velocity history stale (long dead streak),
+                # fall back to freeze to avoid runaway drift.
+                if len(self._vel_vec_history) > 0 and self._health0_count <= 30:
+                    new_wx, new_wy, new_wz = self._extrapolate_position()
+                else:
+                    new_wx, new_wy, new_wz = self._world_x, self._world_y, self._world_z
+                _was_extrapolated = True
                 log.debug(
                     f"[Drift] frame={self._frame_count}  jump={jump:.2f}m > "
-                    f"thresh={threshold:.2f}m — extrapolate "
+                    f"thresh={threshold:.2f}m — {'extrapolate' if not _was_extrapolated else 'freeze'} "
                     f"({new_wx:.2f},{new_wy:.2f})"
                 )
 
-        # Hız güncelle — hem scalar (adaptive threshold) hem vektör (extrapolation)
-        if self._pos_history:
+        # Cumulative anchor drift check: if position drifted too far from last
+        # health=1 anchor, freeze to prevent runaway error.
+        if health == 0 and self._last_ref_anchor is not None and self._max_anchor_drift_m is not None:
+            anchor_dist = math.sqrt(
+                (new_wx - self._last_ref_anchor[0]) ** 2 +
+                (new_wy - self._last_ref_anchor[1]) ** 2
+            )
+            if anchor_dist > self._max_anchor_drift_m:
+                new_wx, new_wy, new_wz = self._world_x, self._world_y, self._world_z
+                _was_extrapolated = True
+                log.debug(
+                    f"[AnchorDrift] frame={self._frame_count}  "
+                    f"anchor_dist={anchor_dist:.1f}m > {self._max_anchor_drift_m}m — freeze"
+                )
+
+        # Hız güncelle — sadece gerçek VO tahminlerinden (extrapolasyon döngüsünü önle)
+        if self._pos_history and not _was_extrapolated:
             prev = self._pos_history[-1]
             vx   = new_wx - prev[0]
             vy   = new_wy - prev[1]
             spd  = math.sqrt(vx ** 2 + vy ** 2)
             self._vel_history.append(spd)
-            # Sadece gerçek hareketten vektör ekle (rejected değil)
             if spd > 0.01:
                 self._vel_vec_history.append((vx, vy))
 

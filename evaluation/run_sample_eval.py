@@ -142,6 +142,9 @@ def run_evaluation(
     backend: str = "orb",
     log_every: int = 100,
     kf_flow: float = 5.0,
+    freeze_after: Optional[int] = None,
+    max_anchor_drift_m: Optional[float] = None,
+    max_jump_m: float = 8.0,
 ) -> dict:
     """
     Video üzerinde OnlineEstimator çalıştır, metrikleri hesapla.
@@ -203,8 +206,10 @@ def run_evaluation(
             n_features=1000,
             sim3_min_pairs=5,
             sim3_update_every=1,
-            max_jump_m=8.0,
+            max_jump_m=max_jump_m,
             min_keyframe_flow_px=kf_flow,
+            health0_freeze_after=freeze_after,
+            max_anchor_drift_m=max_anchor_drift_m,
         )
 
     rows      = []
@@ -529,6 +534,12 @@ def main():
                         help="İlerleme log aralığı")
     parser.add_argument("--kf_flow", type=float, default=5.0,
                         help="min_keyframe_flow_px (varsayılan: 5.0)")
+    parser.add_argument("--max_jump", type=float, default=8.0,
+                        help="Ani drift reddi eşiği metre (varsayılan: 8.0)")
+    parser.add_argument("--freeze_after", type=int, default=None,
+                        help="N art arda health=0 kare sonrası pozisyonda don (None=kapalı)")
+    parser.add_argument("--max_anchor_drift", type=float, default=None,
+                        help="Son health=1 noktasından max sapma (m). Aşılırsa don (None=kapalı)")
     args = parser.parse_args()
 
     # Veri yükle
@@ -573,6 +584,9 @@ def main():
         backend=args.backend,
         log_every=args.log_every,
         kf_flow=args.kf_flow,
+        max_jump_m=args.max_jump,
+        freeze_after=args.freeze_after,
+        max_anchor_drift_m=args.max_anchor_drift,
     )
 
 
