@@ -1,0 +1,18 @@
+ÖRNEK VERİ DEĞERLENDİRME SONUÇLARI
+========================================
+n_frames              : 3009
+n_dead                : 1306
+n_dead_pct            : 43.4
+stride                : 3
+fps                   : 42.4
+mae_3d_official       : 16.0456
+mae_3d_dead           : 36.9688
+rmse_2d_dead          : 33.6685
+max_drift_2d          : 70.7541
+final_drift_2d        : 36.353
+calibrated            : True
+sim3_pairs            : 3
+sim3_scale            : 35.4519
+sim3_rmse             : nan
+drift_rejected        : 0
+confidence            : 1.0
