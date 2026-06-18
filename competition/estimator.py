@@ -81,7 +81,7 @@ class OnlineEstimator:
         ema_alpha: float = 0.025,
         max_jump_m: float = 3.0,
         adaptive_drift: bool = True,
-        sim3_min_pairs: int = 10,
+        sim3_min_pairs: int = 8,
         sim3_update_every: int = 25,
         min_keyframe_flow_px: float = 5.0,
         altitude_m: Optional[float] = None,
@@ -89,7 +89,7 @@ class OnlineEstimator:
         health0_freeze_after: Optional[int] = None,
         max_anchor_drift_m: Optional[float] = None,
         affine_alpha: float = 0.7,
-        h0_reset_min: int = 0,
+        h0_reset_min: int = 1,
     ):
         # 4.1 Kamera matrisi
         self.K = np.array([[fx,  0.0, cx],
@@ -220,39 +220,42 @@ class OnlineEstimator:
         self._frame_count += 1
         gray = self._preprocess(frame)
 
-        # ── Health 0→1 geçişi: tam sıfırlama ────────────────────────────────────
-        # Birikmiş VO drift'i bir sonraki health=0 segmentine taşıma.
-        # T_world identity'ye döner; Sim3 ve kalibrasyon verisi temizlenir.
-        # scale/rotation miras alınır → çok kısa health=1 flashlerinde bile
-        # Sim3 makul tahmin üretebilir (warm initialization).
+        # ── Health 0→1 geçişi ────────────────────────────────────────────────────
+        # Brief h0 dips (≤ h0_reset_min consecutive frames) are skipped: T_world
+        # and Sim3 remain intact so calibration pairs keep accumulating without
+        # a coordinate-frame break. Long dead segments trigger a full reset with
+        # warm Sim3 initialization to prevent VO drift from poisoning calibration.
         if health == 1 and self._prev_health == 0 and self._keyframe_gray is not None:
-            # Inherit scale/rotation before wiping the Sim3.
-            # After T_world reset the first GPS pair updates translation via
-            # warm-init, so even 1-2 health=1 frames give a usable calibration.
-            if self._sim3.calibrated:
-                self._inherited_s: float | None = self._sim3._s
-                self._inherited_R: np.ndarray | None = self._sim3._R.copy()
+            if self._h0_consec > self._h0_reset_min:
+                # Long h0 block: full reset + warm init
+                if self._sim3.calibrated:
+                    self._inherited_s: float | None = self._sim3._s
+                    self._inherited_R: np.ndarray | None = self._sim3._R.copy()
+                else:
+                    self._inherited_s = None
+                    self._inherited_R = None
+                self._T_world      = np.eye(4, dtype=np.float64)
+                self._last_valid_T = None
+                self._sim3         = Sim3Aligner(
+                    min_pairs    = self._sim3.min_pairs,
+                    update_every = self._sim3.update_every,
+                    window_size  = self._sim3.window_size,
+                )
+                self._calib_vo.clear()
+                self._calib_ref.clear()
+                self._pos_history.clear()
+                self._vel_history.clear()
+                self._vel_vec_history.clear()
+                self._lk_pts = None
+                self._health0_count = 0
+                self._affine_scale_product = 1.0
+                self._affine_scale_at_sim3_calib = 1.0
+                log.debug(f"[Reset] health 0→1 frame={self._frame_count}: tam sıfırlama "
+                          f"(h0_consec={self._h0_consec})")
             else:
-                self._inherited_s = None
-                self._inherited_R = None
+                log.debug(f"[NoReset] health 0→1 frame={self._frame_count}: "
+                          f"brief h0 dip ({self._h0_consec} frames), keeping T_world+Sim3")
             self._h0_consec = 0
-            self._T_world      = np.eye(4, dtype=np.float64)
-            self._last_valid_T = None
-            self._sim3         = Sim3Aligner(
-                min_pairs    = self._sim3.min_pairs,
-                update_every = self._sim3.update_every,
-                window_size  = self._sim3.window_size,
-            )
-            self._calib_vo.clear()
-            self._calib_ref.clear()
-            self._pos_history.clear()
-            self._vel_history.clear()
-            self._vel_vec_history.clear()
-            self._lk_pts = None
-            self._health0_count = 0
-            self._affine_scale_product = 1.0
-            self._affine_scale_at_sim3_calib = 1.0
-            log.debug(f"[Reset] health 0→1 frame={self._frame_count}: tam sıfırlama")
         if health == 0:
             self._h0_consec += 1
         self._prev_health = health

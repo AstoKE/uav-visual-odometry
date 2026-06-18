@@ -146,6 +146,8 @@ def run_evaluation(
     max_anchor_drift_m: Optional[float] = None,
     max_jump_m: float = 8.0,
     affine_alpha: float = 0.7,
+    h0_reset_min: int = 1,
+    sim3_min_pairs: int = 8,
 ) -> dict:
     """
     Video üzerinde OnlineEstimator çalıştır, metrikleri hesapla.
@@ -205,13 +207,14 @@ def run_evaluation(
             dist_coeffs=dist_arr,
             altitude_m=altitude_m,
             n_features=1000,
-            sim3_min_pairs=5,
+            sim3_min_pairs=sim3_min_pairs,
             sim3_update_every=1,
             max_jump_m=max_jump_m,
             min_keyframe_flow_px=kf_flow,
             health0_freeze_after=freeze_after,
             max_anchor_drift_m=max_anchor_drift_m,
             affine_alpha=affine_alpha,
+            h0_reset_min=h0_reset_min,
         )
 
     rows      = []
@@ -544,6 +547,10 @@ def main():
                         help="Son health=1 noktasından max sapma (m). Aşılırsa don (None=kapalı)")
     parser.add_argument("--affine_alpha", type=float, default=0.7,
                         help="Affine altitude düzeltme kuvveti (0=kapalı, 1=tam, varsayılan: 0.7)")
+    parser.add_argument("--h0_reset_min", type=int, default=1,
+                        help="Bu kadar kare veya daha kısa health=0 bloklarında Sim3 sıfırlanmaz (0=her zaman sıfırla)")
+    parser.add_argument("--sim3_min_pairs", type=int, default=8,
+                        help="Sim3 Umeyama için minimum kalibrasyon çifti sayısı (varsayılan: 8)")
     args = parser.parse_args()
 
     # Veri yükle
@@ -592,6 +599,8 @@ def main():
         freeze_after=args.freeze_after,
         max_anchor_drift_m=args.max_anchor_drift,
         affine_alpha=args.affine_alpha,
+        h0_reset_min=args.h0_reset_min,
+        sim3_min_pairs=args.sim3_min_pairs,
     )
 
 
